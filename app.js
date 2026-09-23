@@ -4073,6 +4073,9 @@ function setupEventListeners() {
     document.getElementById('export-all-languages').addEventListener('click', () => {
         closeExportLanguageDialog('all');
     });
+    document.getElementById('export-fastlane').addEventListener('click', () => {
+        closeExportLanguageDialog('fastlane');
+    });
     document.getElementById('export-language-modal-cancel').addEventListener('click', () => {
         closeExportLanguageDialog(null);
     });
@@ -7843,22 +7846,15 @@ async function exportAll() {
         return;
     }
 
-    // Check if project has multiple languages configured
-    const hasMultipleLanguages = state.projectLanguages.length > 1;
-
-    if (hasMultipleLanguages) {
-        // Show language choice dialog
-        showExportLanguageDialog(async (choice) => {
-            if (choice === 'current') {
-                await exportAllForLanguage(state.currentLanguage);
-            } else if (choice === 'all') {
-                await exportAllLanguages();
-            }
-        });
-    } else {
-        // Only one language, export directly
-        await exportAllForLanguage(state.currentLanguage);
-    }
+    showExportLanguageDialog(async (choice) => {
+        if (choice === 'current') {
+            await exportAllForLanguage(state.currentLanguage);
+        } else if (choice === 'all') {
+            await exportAllLanguages();
+        } else if (choice === 'fastlane') {
+            await exportForFastlane();
+        }
+    });
 }
 
 // Show export progress modal
@@ -7881,56 +7877,66 @@ function hideExportProgress() {
 }
 
 // Export all screenshots for a specific language
-async function exportAllForLanguage(lang) {
+// App Store Connect locale (fastlane deliver folder name) for each app language code.
+// Codes checked against FastlaneCore::Languages::ALL_LANGUAGES.
+const fastlaneLocales = {
+    'en': 'en-US', 'en-gb': 'en-GB', 'de': 'de-DE', 'fr': 'fr-FR', 'es': 'es-ES',
+    'it': 'it', 'pt': 'pt-PT', 'pt-br': 'pt-BR', 'nl': 'nl-NL', 'ru': 'ru',
+    'ja': 'ja', 'ko': 'ko', 'zh': 'zh-Hans', 'zh-tw': 'zh-Hant', 'ar': 'ar-SA',
+    'hi': 'hi', 'tr': 'tr', 'pl': 'pl', 'sv': 'sv', 'da': 'da',
+    'no': 'no', 'fi': 'fi', 'th': 'th', 'vi': 'vi', 'id': 'id',
+    'uk': 'uk', 'he': 'he'
+};
+
+// Render every screenshot in each of `langs` and pass the PNG (base64) to
+// onImage(lang, index, base64). Temporarily switches the current language
+// (images and text) and restores the previous selection afterwards.
+async function renderScreenshotsForLanguages(langs, onImage) {
     const originalIndex = state.selectedIndex;
     const originalLang = state.currentLanguage;
-    const zip = new JSZip();
-    const total = state.screenshots.length;
-
-    // Show progress
-    const langName = languageNames[lang] || lang.toUpperCase();
-    showExportProgress('Exporting...', `Preparing ${langName} screenshots`, 0);
-
-    // Save original text languages for each screenshot
     const originalTextLangs = state.screenshots.map(s => ({
         headline: s.text.currentHeadlineLang,
         subheadline: s.text.currentSubheadlineLang
     }));
+    const total = langs.length * state.screenshots.length;
+    let completed = 0;
 
-    // Temporarily switch to the target language (images and text)
-    state.currentLanguage = lang;
-    state.screenshots.forEach(s => {
-        s.text.currentHeadlineLang = lang;
-        s.text.currentSubheadlineLang = lang;
-    });
+    try {
+        for (const lang of langs) {
+            const langName = languageNames[lang] || lang.toUpperCase();
+            state.currentLanguage = lang;
+            state.screenshots.forEach(s => {
+                s.text.currentHeadlineLang = lang;
+                s.text.currentSubheadlineLang = lang;
+            });
 
-    for (let i = 0; i < state.screenshots.length; i++) {
-        state.selectedIndex = i;
+            for (let i = 0; i < state.screenshots.length; i++) {
+                state.selectedIndex = i;
+                updateCanvas();
+
+                completed++;
+                const percent = Math.round((completed / total) * 90); // Reserve 10% for ZIP generation
+                showExportProgress('Exporting...', `${langName}: Screenshot ${i + 1} of ${state.screenshots.length}`, percent);
+
+                // Give 3D renders and freshly loaded fonts a moment to settle
+                await new Promise(resolve => setTimeout(resolve, 100));
+
+                const base64 = canvas.toDataURL('image/png').replace(/^data:image\/png;base64,/, '');
+                onImage(lang, i, base64);
+            }
+        }
+    } finally {
+        state.selectedIndex = originalIndex;
+        state.currentLanguage = originalLang;
+        state.screenshots.forEach((s, i) => {
+            s.text.currentHeadlineLang = originalTextLangs[i].headline;
+            s.text.currentSubheadlineLang = originalTextLangs[i].subheadline;
+        });
         updateCanvas();
-
-        // Update progress
-        const percent = Math.round(((i + 1) / total) * 90); // Reserve 10% for ZIP generation
-        showExportProgress('Exporting...', `Screenshot ${i + 1} of ${total}`, percent);
-
-        await new Promise(resolve => setTimeout(resolve, 100));
-
-        // Get canvas data as base64, strip the data URL prefix
-        const dataUrl = canvas.toDataURL('image/png');
-        const base64Data = dataUrl.replace(/^data:image\/png;base64,/, '');
-
-        zip.file(`screenshot-${i + 1}.png`, base64Data, { base64: true });
     }
+}
 
-    // Restore original settings
-    state.selectedIndex = originalIndex;
-    state.currentLanguage = originalLang;
-    state.screenshots.forEach((s, i) => {
-        s.text.currentHeadlineLang = originalTextLangs[i].headline;
-        s.text.currentSubheadlineLang = originalTextLangs[i].subheadline;
-    });
-    updateCanvas();
-
-    // Generate ZIP
+async function downloadZip(zip, filename) {
     showExportProgress('Generating ZIP...', '', 95);
     const content = await zip.generateAsync({ type: 'blob' });
 
@@ -7939,84 +7945,50 @@ async function exportAllForLanguage(lang) {
     hideExportProgress();
 
     const link = document.createElement('a');
-    link.download = `screenshots_${state.outputDevice}_${lang}.zip`;
+    link.download = filename;
     link.href = URL.createObjectURL(content);
     link.click();
-    URL.revokeObjectURL(link.href);
+    // Revoking synchronously can cancel the download in some browsers
+    setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+}
+
+async function exportAllForLanguage(lang) {
+    const zip = new JSZip();
+    await renderScreenshotsForLanguages([lang], (_lang, i, base64) => {
+        zip.file(`screenshot-${i + 1}.png`, base64, { base64: true });
+    });
+    await downloadZip(zip, `screenshots_${state.outputDevice}_${lang}.zip`);
 }
 
 // Export all screenshots for all languages (separate folders)
 async function exportAllLanguages() {
-    const originalIndex = state.selectedIndex;
-    const originalLang = state.currentLanguage;
     const zip = new JSZip();
+    await renderScreenshotsForLanguages(state.projectLanguages, (lang, i, base64) => {
+        zip.file(`${lang}/screenshot-${i + 1}.png`, base64, { base64: true });
+    });
+    await downloadZip(zip, `screenshots_${state.outputDevice}_all-languages.zip`);
+}
 
-    const totalLangs = state.projectLanguages.length;
-    const totalScreenshots = state.screenshots.length;
-    const totalItems = totalLangs * totalScreenshots;
-    let completedItems = 0;
-
-    // Show progress
-    showExportProgress('Exporting...', 'Preparing all languages', 0);
-
-    // Save original text languages for each screenshot
-    const originalTextLangs = state.screenshots.map(s => ({
-        headline: s.text.currentHeadlineLang,
-        subheadline: s.text.currentSubheadlineLang
-    }));
-
-    for (let langIdx = 0; langIdx < state.projectLanguages.length; langIdx++) {
-        const lang = state.projectLanguages[langIdx];
-        const langName = languageNames[lang] || lang.toUpperCase();
-
-        // Temporarily switch to this language (images and text)
-        state.currentLanguage = lang;
-        state.screenshots.forEach(s => {
-            s.text.currentHeadlineLang = lang;
-            s.text.currentSubheadlineLang = lang;
-        });
-
-        for (let i = 0; i < state.screenshots.length; i++) {
-            state.selectedIndex = i;
-            updateCanvas();
-
-            completedItems++;
-            const percent = Math.round((completedItems / totalItems) * 90); // Reserve 10% for ZIP
-            showExportProgress('Exporting...', `${langName}: Screenshot ${i + 1} of ${totalScreenshots}`, percent);
-
-            await new Promise(resolve => setTimeout(resolve, 100));
-
-            // Get canvas data as base64, strip the data URL prefix
-            const dataUrl = canvas.toDataURL('image/png');
-            const base64Data = dataUrl.replace(/^data:image\/png;base64,/, '');
-
-            // Use language code as folder name
-            zip.file(`${lang}/screenshot-${i + 1}.png`, base64Data, { base64: true });
-        }
+// Export all languages in the layout fastlane deliver expects:
+// screenshots/<App Store locale>/<NN>_<device>.png. deliver detects the display
+// type from the image size and uploads in filename order.
+async function exportForFastlane() {
+    if (!/^(iphone|ipad)-/.test(state.outputDevice)) {
+        await showAppAlert('fastlane export needs an iPhone or iPad output size. Pick one under Output Size first.', 'info');
+        return;
+    }
+    const unmapped = state.projectLanguages.filter(lang => !fastlaneLocales[lang]);
+    if (unmapped.length > 0) {
+        await showAppAlert(`No App Store locale is known for: ${unmapped.join(', ')}. Remove these languages or export them separately.`, 'error');
+        return;
     }
 
-    // Restore original settings
-    state.selectedIndex = originalIndex;
-    state.currentLanguage = originalLang;
-    state.screenshots.forEach((s, i) => {
-        s.text.currentHeadlineLang = originalTextLangs[i].headline;
-        s.text.currentSubheadlineLang = originalTextLangs[i].subheadline;
+    const zip = new JSZip();
+    await renderScreenshotsForLanguages(state.projectLanguages, (lang, i, base64) => {
+        const number = String(i + 1).padStart(2, '0');
+        zip.file(`screenshots/${fastlaneLocales[lang]}/${number}_${state.outputDevice}.png`, base64, { base64: true });
     });
-    updateCanvas();
-
-    // Generate ZIP
-    showExportProgress('Generating ZIP...', '', 95);
-    const content = await zip.generateAsync({ type: 'blob' });
-
-    showExportProgress('Complete!', '', 100);
-    await new Promise(resolve => setTimeout(resolve, 1500));
-    hideExportProgress();
-
-    const link = document.createElement('a');
-    link.download = `screenshots_${state.outputDevice}_all-languages.zip`;
-    link.href = URL.createObjectURL(content);
-    link.click();
-    URL.revokeObjectURL(link.href);
+    await downloadZip(zip, `fastlane_screenshots_${state.outputDevice}.zip`);
 }
 
 // ===== Emoji Picker (inline dropdown) =====

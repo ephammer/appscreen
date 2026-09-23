@@ -415,6 +415,12 @@ function showExportLanguageDialog(callback) {
         currentLangDisplay.textContent = `${flag} ${name}`;
     }
 
+    // "All Languages" only makes sense when the project has more than one
+    const allLanguagesBtn = document.getElementById('export-all-languages');
+    if (allLanguagesBtn) {
+        allLanguagesBtn.style.display = state.projectLanguages.length > 1 ? '' : 'none';
+    }
+
     modal.classList.add('visible');
 }
 
