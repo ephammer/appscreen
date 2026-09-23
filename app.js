@@ -1728,9 +1728,35 @@ function loadState() {
                         }
                     }
 
+                    // Build a screenshot entry from its saved record, filling settings that older
+                    // saves lack with the migrated project-level settings
+                    const buildScreenshot = (s, image, localizedImages) => {
+                        const screenshotSettings = s.screenshot || JSON.parse(JSON.stringify(migratedScreenshot));
+                        if (needs3DMigration) {
+                            migrate3DPosition(screenshotSettings);
+                        }
+                        return {
+                            image,
+                            name: s.name,
+                            deviceType: s.deviceType,
+                            localizedImages,
+                            background: s.background || JSON.parse(JSON.stringify(migratedBackground)),
+                            screenshot: screenshotSettings,
+                            text: s.text || JSON.parse(JSON.stringify(migratedText)),
+                            elements: reconstructElementImages(s.elements),
+                            popouts: s.popouts || [],
+                            overrides: s.overrides || {}
+                        };
+                    };
+
                     if (parsed.screenshots && parsed.screenshots.length > 0) {
                         let loadedCount = 0;
                         const totalToLoad = parsed.screenshots.length;
+                        const screenshotLoaded = (index, entry) => {
+                            state.screenshots[index] = entry;
+                            loadedCount++;
+                            checkAllLoaded();
+                        };
 
                         parsed.screenshots.forEach((s, index) => {
                             // Check if we have new localized format or old single-image format
@@ -1738,73 +1764,39 @@ function loadState() {
 
                             if (!hasLocalizedImages && !s.src) {
                                 // Blank screen (no image)
-                                const screenshotSettings = s.screenshot || JSON.parse(JSON.stringify(migratedScreenshot));
-                                if (needs3DMigration) {
-                                    migrate3DPosition(screenshotSettings);
-                                }
-                                state.screenshots[index] = {
-                                    image: null,
-                                    name: s.name || 'Blank Screen',
-                                    deviceType: s.deviceType,
-                                    localizedImages: {},
-                                    background: s.background || JSON.parse(JSON.stringify(migratedBackground)),
-                                    screenshot: screenshotSettings,
-                                    text: s.text || JSON.parse(JSON.stringify(migratedText)),
-                                    elements: reconstructElementImages(s.elements),
-                                    popouts: s.popouts || [],
-                                    overrides: s.overrides || {}
-                                };
-                                loadedCount++;
-                                checkAllLoaded();
+                                screenshotLoaded(index, { ...buildScreenshot(s, null, {}), name: s.name || 'Blank Screen' });
                             } else if (hasLocalizedImages) {
-                                // New format: load all localized images
+                                // New format: load all localized images. Images that fail to decode are
+                                // skipped rather than stalling the whole project load.
                                 const langKeys = Object.keys(s.localizedImages);
-                                let langLoadedCount = 0;
                                 const localizedImages = {};
+                                let langSettled = 0;
+                                const langDone = () => {
+                                    if (++langSettled < langKeys.length) return;
+                                    const firstLang = langKeys[0];
+                                    screenshotLoaded(index, buildScreenshot(s, localizedImages[firstLang]?.image, localizedImages)); // image: legacy compat
+                                };
 
                                 langKeys.forEach(lang => {
                                     const langData = s.localizedImages[lang];
-                                    if (langData?.src) {
-                                        const langImg = new Image();
-                                        langImg.onload = () => {
-                                            localizedImages[lang] = {
-                                                image: langImg,
-                                                src: langData.src,
-                                                name: langData.name || s.name
-                                            };
-                                            langLoadedCount++;
-
-                                            if (langLoadedCount === langKeys.length) {
-                                                // All language versions loaded
-                                                const firstLang = langKeys[0];
-                                                const screenshotSettings = s.screenshot || JSON.parse(JSON.stringify(migratedScreenshot));
-                                                if (needs3DMigration) {
-                                                    migrate3DPosition(screenshotSettings);
-                                                }
-                                                state.screenshots[index] = {
-                                                    image: localizedImages[firstLang]?.image, // Legacy compat
-                                                    name: s.name,
-                                                    deviceType: s.deviceType,
-                                                    localizedImages: localizedImages,
-                                                    background: s.background || JSON.parse(JSON.stringify(migratedBackground)),
-                                                    screenshot: screenshotSettings,
-                                                    text: s.text || JSON.parse(JSON.stringify(migratedText)),
-                                                    elements: reconstructElementImages(s.elements),
-                                                    popouts: s.popouts || [],
-                                                    overrides: s.overrides || {}
-                                                };
-                                                loadedCount++;
-                                                checkAllLoaded();
-                                            }
-                                        };
-                                        langImg.src = langData.src;
-                                    } else {
-                                        langLoadedCount++;
-                                        if (langLoadedCount === langKeys.length) {
-                                            loadedCount++;
-                                            checkAllLoaded();
-                                        }
+                                    if (!langData?.src) {
+                                        langDone();
+                                        return;
                                     }
+                                    const langImg = new Image();
+                                    langImg.onload = () => {
+                                        localizedImages[lang] = {
+                                            image: langImg,
+                                            src: langData.src,
+                                            name: langData.name || s.name
+                                        };
+                                        langDone();
+                                    };
+                                    langImg.onerror = () => {
+                                        console.error(`Could not load ${lang} image for screenshot "${s.name}"`);
+                                        langDone();
+                                    };
+                                    langImg.src = langData.src;
                                 });
                             } else {
                                 // Old format: migrate to localized images
@@ -1821,25 +1813,11 @@ function loadState() {
                                         src: s.src,
                                         name: s.name
                                     };
-
-                                    const screenshotSettings = s.screenshot || JSON.parse(JSON.stringify(migratedScreenshot));
-                                    if (needs3DMigration) {
-                                        migrate3DPosition(screenshotSettings);
-                                    }
-                                    state.screenshots[index] = {
-                                        image: img,
-                                        name: s.name,
-                                        deviceType: s.deviceType,
-                                        localizedImages: localizedImages,
-                                        background: s.background || JSON.parse(JSON.stringify(migratedBackground)),
-                                        screenshot: screenshotSettings,
-                                        text: s.text || JSON.parse(JSON.stringify(migratedText)),
-                                        elements: reconstructElementImages(s.elements),
-                                        popouts: s.popouts || [],
-                                        overrides: s.overrides || {}
-                                    };
-                                    loadedCount++;
-                                    checkAllLoaded();
+                                    screenshotLoaded(index, buildScreenshot(s, img, localizedImages));
+                                };
+                                img.onerror = () => {
+                                    console.error(`Could not load image for screenshot "${s.name}"`);
+                                    screenshotLoaded(index, buildScreenshot(s, null, {}));
                                 };
                                 img.src = s.src;
                             }
