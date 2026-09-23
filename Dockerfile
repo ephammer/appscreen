@@ -15,6 +15,7 @@ COPY index.html styles.css *.js /usr/share/nginx/html/
 
 # Copy assets
 COPY models/ /usr/share/nginx/html/models/
+COPY vendor/ /usr/share/nginx/html/vendor/
 COPY img/ /usr/share/nginx/html/img/
 
 # Copy custom nginx configuration for SPA and caching
