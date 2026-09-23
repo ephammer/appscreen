@@ -6,6 +6,8 @@ const state = {
     outputDevice: 'iphone-6.9',
     currentLanguage: 'en', // Global current language for all text
     projectLanguages: ['en'], // Languages available in this project
+    mirrorRTL: true, // Mirror the layout horizontally for right-to-left languages
+    languageFonts: {}, // Font per language, overriding headline/subheadline/text element fonts
     customWidth: 1290,
     customHeight: 2796,
     // Default settings applied to new screenshots
@@ -134,9 +136,12 @@ function getBackground() {
     return screenshot ? screenshot.background : state.defaults.background;
 }
 
+// Device settings being edited: the current language's own layout if it has one,
+// otherwise the shared layout
 function getScreenshotSettings() {
     const screenshot = getCurrentScreenshot();
-    return screenshot ? screenshot.screenshot : state.defaults.screenshot;
+    if (!screenshot) return state.defaults.screenshot;
+    return screenshot.languageLayouts?.[state.currentLanguage] || screenshot.screenshot;
 }
 
 function getText() {
@@ -221,6 +226,186 @@ function getElements() {
 function getSelectedElement() {
     if (!selectedElementId) return null;
     return getElements().find(el => el.id === selectedElementId) || null;
+}
+
+// ===== Right-to-left languages and mirrored layouts =====
+// Stored positions always describe the shared left-to-right layout. For right-to-left
+// languages the layout is mirrored horizontally at render time (unless turned off per
+// project), so a design made once in English flips itself for Hebrew.
+const rtlLanguages = new Set(['he', 'ar']);
+
+function isRTL(lang) {
+    return rtlLanguages.has(lang);
+}
+
+function isMirroredLanguage(lang = state.currentLanguage) {
+    return state.mirrorRTL !== false && isRTL(lang);
+}
+
+function mirrorScreenshotSettings(ss) {
+    const mirrored = {
+        ...ss,
+        x: 100 - ss.x,
+        rotation: -(ss.rotation || 0),
+        perspective: -(ss.perspective || 0)
+    };
+    if (ss.shadow) mirrored.shadow = { ...ss.shadow, x: -(ss.shadow.x || 0) };
+    if (ss.rotation3D) mirrored.rotation3D = { ...ss.rotation3D, y: -ss.rotation3D.y, z: -ss.rotation3D.z };
+    return mirrored;
+}
+
+function mirrorElement(el) {
+    const mirrored = { ...el, x: 100 - el.x, rotation: -(el.rotation || 0) };
+    if (el.iconShadow) mirrored.iconShadow = { ...el.iconShadow, x: -(el.iconShadow.x || 0) };
+    return mirrored;
+}
+
+function mirrorPopout(p) {
+    const mirrored = {
+        ...p,
+        x: 100 - p.x,
+        rotation: -(p.rotation || 0),
+        // The localized screenshot's UI is itself mirrored, so mirror the crop region too
+        cropX: 100 - p.cropX - p.cropWidth
+    };
+    if (p.shadow) mirrored.shadow = { ...p.shadow, x: -(p.shadow.x || 0) };
+    return mirrored;
+}
+
+function hasLanguageLayout(screenshot, lang) {
+    return !!screenshot?.languageLayouts?.[lang];
+}
+
+// True when the device is shown mirrored from the shared layout (RTL language
+// without its own layout). Device edits in this view land in the shared layout.
+function isDeviceMirrored(lang = state.currentLanguage) {
+    return isMirroredLanguage(lang) && !hasLanguageLayout(getCurrentScreenshot(), lang);
+}
+
+// Device settings as rendered for `lang`: the language's own layout if it has one,
+// otherwise the shared layout (mirrored for right-to-left languages)
+function resolveScreenshotSettings(screenshot, lang) {
+    const own = screenshot.languageLayouts?.[lang];
+    if (own) return own;
+    const ss = screenshot.screenshot;
+    return isMirroredLanguage(lang) ? mirrorScreenshotSettings(ss) : ss;
+}
+
+function isElementHiddenIn(el, lang) {
+    return Array.isArray(el.hiddenLanguages) && el.hiddenLanguages.includes(lang);
+}
+
+function resolveElements(elements, lang) {
+    const visible = elements.filter(el => !isElementHiddenIn(el, lang));
+    return isMirroredLanguage(lang) ? visible.map(mirrorElement) : visible;
+}
+
+// Project-level font override for a language (e.g. a Hebrew font), or null
+function getLanguageFont(lang) {
+    return state.languageFonts?.[lang] || null;
+}
+
+function resolvePopouts(popouts, lang) {
+    return isMirroredLanguage(lang) ? popouts.map(mirrorPopout) : popouts;
+}
+
+// Read-only settings for drawing the current screenshot in the current language.
+// Edits must keep going through getScreenshotSettings().
+function getRenderScreenshotSettings() {
+    const screenshot = getCurrentScreenshot();
+    return screenshot ? resolveScreenshotSettings(screenshot, state.currentLanguage) : state.defaults.screenshot;
+}
+
+// Screenshot tab panel explaining which device layout the current language uses,
+// with the action to customize it for this language or go back to the shared one
+function updateLanguageLayoutPanel() {
+    const panel = document.getElementById('language-layout-panel');
+    if (!panel) return;
+    const screenshot = getCurrentScreenshot();
+    if (!screenshot || state.projectLanguages.length < 2) {
+        panel.style.display = 'none';
+        return;
+    }
+    const lang = state.currentLanguage;
+    const name = languageNames[lang] || lang;
+    let title, desc, action;
+    if (hasLanguageLayout(screenshot, lang)) {
+        title = `Custom layout for ${name}`;
+        desc = `Device settings here only apply to ${name} on this screenshot.`;
+        action = isMirroredLanguage(lang) ? 'Reset to mirrored layout' : 'Reset to shared layout';
+    } else if (isMirroredLanguage(lang)) {
+        title = `Mirrored for ${name}`;
+        desc = 'Position and rotation edit the shared layout, which is shown flipped here.';
+        action = `Customize for ${name}`;
+    } else {
+        title = 'Shared layout';
+        desc = 'Device settings apply to every language without its own layout.';
+        action = `Customize for ${name}`;
+    }
+    panel.style.display = 'flex';
+    document.getElementById('language-layout-title').textContent = title;
+    document.getElementById('language-layout-desc').textContent = desc;
+    document.getElementById('language-layout-action').textContent = action;
+}
+
+// Give the current language its own copy of this screenshot's device settings
+// (starting from what it shows now), or drop it to go back to the shared layout
+function toggleLanguageLayout() {
+    const screenshot = getCurrentScreenshot();
+    if (!screenshot) return;
+    const lang = state.currentLanguage;
+    if (!screenshot.languageLayouts) screenshot.languageLayouts = {};
+    if (hasLanguageLayout(screenshot, lang)) {
+        delete screenshot.languageLayouts[lang];
+    } else {
+        screenshot.languageLayouts[lang] = JSON.parse(JSON.stringify(resolveScreenshotSettings(screenshot, lang)));
+    }
+    syncUIWithState();
+    updateCanvas();
+}
+
+function fontNameFromValue(fontValue) {
+    const systemFont = googleFonts.system.find(f => f.value === fontValue);
+    if (systemFont) return systemFont.name;
+    const match = fontValue.match(/'([^']+)'/);
+    return match ? match[1] : fontValue;
+}
+
+// Text tab control for the current language's font override
+function updateLanguageFontControl() {
+    const group = document.getElementById('language-font-group');
+    if (!group) return;
+    group.style.display = state.projectLanguages.length > 1 ? '' : 'none';
+
+    const lang = state.currentLanguage;
+    const name = languageNames[lang] || lang;
+    const fontValue = getLanguageFont(lang);
+    document.getElementById('language-font-label').textContent = `${name} font`;
+    document.getElementById('language-font-reset').style.display = fontValue ? '' : 'none';
+    const preview = document.getElementById('language-font-picker-preview');
+    if (fontValue) {
+        preview.textContent = fontNameFromValue(fontValue);
+        preview.style.fontFamily = fontValue;
+        const match = fontValue.match(/'([^']+)'/);
+        if (match && !googleFonts.system.some(f => f.value === fontValue)) {
+            // Redraw once the font is available so the canvas doesn't keep the fallback
+            loadGoogleFont(match[1]).then(() => updateCanvas());
+        }
+    } else {
+        preview.textContent = 'Same as headline';
+        preview.style.fontFamily = '';
+    }
+}
+
+function setLanguageFont(fontValue) {
+    if (!state.languageFonts) state.languageFonts = {};
+    if (fontValue) {
+        state.languageFonts[state.currentLanguage] = fontValue;
+    } else {
+        delete state.languageFonts[state.currentLanguage];
+    }
+    updateLanguageFontControl();
+    updateCanvas();
 }
 
 function getElementText(el) {
@@ -587,15 +772,17 @@ function setBackground(key, value) {
 function setScreenshotSetting(key, value) {
     const screenshot = getCurrentScreenshot();
     if (screenshot) {
+        // Writes to the current language's own layout when it has one
+        const settings = getScreenshotSettings();
         if (key.includes('.')) {
             const parts = key.split('.');
-            let obj = screenshot.screenshot;
+            let obj = settings;
             for (let i = 0; i < parts.length - 1; i++) {
                 obj = obj[parts[i]];
             }
             obj[parts[parts.length - 1]] = value;
         } else {
-            screenshot.screenshot[key] = value;
+            settings[key] = value;
         }
     }
 }
@@ -623,7 +810,7 @@ const languageFlags = {
     'ja': '🇯🇵', 'ko': '🇰🇷', 'zh': '🇨🇳', 'zh-tw': '🇹🇼', 'ar': '🇸🇦',
     'hi': '🇮🇳', 'tr': '🇹🇷', 'pl': '🇵🇱', 'sv': '🇸🇪', 'da': '🇩🇰',
     'no': '🇳🇴', 'fi': '🇫🇮', 'th': '🇹🇭', 'vi': '🇻🇳', 'id': '🇮🇩',
-    'uk': '🇺🇦'
+    'uk': '🇺🇦', 'he': '🇮🇱'
 };
 
 // Google Fonts configuration
@@ -982,7 +1169,8 @@ async function fetchAllGoogleFonts() {
 const fontPickerState = {
     headline: { category: 'popular', search: '' },
     subheadline: { category: 'popular', search: '' },
-    element: { category: 'popular', search: '' }
+    element: { category: 'popular', search: '' },
+    language: { category: 'popular', search: '' }
 };
 
 // Initialize all font pickers
@@ -1020,6 +1208,19 @@ function initFontPicker() {
         stateKey: 'font',
         getFont: () => { const el = getSelectedElement(); return el ? el.font : ''; },
         setFont: (value) => { if (selectedElementId) setElementProperty(selectedElementId, 'font', value); }
+    });
+
+    initSingleFontPicker('language', {
+        picker: 'language-font-picker',
+        trigger: 'language-font-picker-trigger',
+        dropdown: 'language-font-picker-dropdown',
+        search: 'language-font-search',
+        list: 'language-font-picker-list',
+        preview: 'language-font-picker-preview',
+        hidden: 'language-font',
+        stateKey: 'headlineFont',
+        getFont: () => getLanguageFont(state.currentLanguage) || '',
+        setFont: (value) => setLanguageFont(value)
     });
 }
 
@@ -1574,7 +1775,8 @@ function saveState() {
                 image: undefined // Don't serialize Image objects
             })),
             popouts: s.popouts || [],
-            overrides: s.overrides
+            overrides: s.overrides,
+            languageLayouts: s.languageLayouts || {}
         };
     });
 
@@ -1588,6 +1790,8 @@ function saveState() {
         customHeight: state.customHeight,
         currentLanguage: state.currentLanguage,
         projectLanguages: state.projectLanguages,
+        mirrorRTL: state.mirrorRTL,
+        languageFonts: state.languageFonts,
         defaults: state.defaults
     };
 
@@ -1748,7 +1952,8 @@ function loadState() {
                             text: s.text || JSON.parse(JSON.stringify(migratedText)),
                             elements: reconstructElementImages(s.elements),
                             popouts: s.popouts || [],
-                            overrides: s.overrides || {}
+                            overrides: s.overrides || {},
+                            languageLayouts: s.languageLayouts || {}
                         };
                     };
 
@@ -1854,6 +2059,8 @@ function loadState() {
                     // Load global language settings
                     state.currentLanguage = parsed.currentLanguage || 'en';
                     state.projectLanguages = parsed.projectLanguages || ['en'];
+                    state.mirrorRTL = parsed.mirrorRTL !== false;
+                    state.languageFonts = parsed.languageFonts || {};
 
                     // Load defaults (new format) or use migrated settings
                     if (parsed.defaults) {
@@ -1914,6 +2121,8 @@ function resetStateToDefaults() {
     state.customHeight = 2868;
     state.currentLanguage = 'en';
     state.projectLanguages = ['en'];
+    state.mirrorRTL = true;
+    state.languageFonts = {};
     state.defaults = {
         background: {
             type: 'gradient',
@@ -2115,7 +2324,8 @@ function duplicateScreenshot(index) {
         background: original.background,
         screenshot: original.screenshot,
         text: original.text,
-        overrides: original.overrides
+        overrides: original.overrides,
+        languageLayouts: original.languageLayouts || {}
     }));
 
     const nameParts = clone.name.split('.');
@@ -2197,6 +2407,7 @@ function updateFrameColorSwatches(deviceType, activeColorId) {
 
 // Sync UI controls with current state
 function syncUIWithState() {
+    updateLanguageFontControl();
     // Update language button
     updateLanguageButton();
 
@@ -2412,7 +2623,8 @@ function updateElementsList() {
 
     elements.forEach(el => {
         const item = document.createElement('div');
-        item.className = 'element-item' + (el.id === selectedElementId ? ' selected' : '');
+        const hiddenHere = isElementHiddenIn(el, state.currentLanguage);
+        item.className = 'element-item' + (el.id === selectedElementId ? ' selected' : '') + (hiddenHere ? ' hidden-in-language' : '');
         item.dataset.elementId = el.id;
 
         const layerLabels = {
@@ -2438,7 +2650,7 @@ function updateElementsList() {
             <div class="element-item-thumb">${thumbContent}</div>
             <div class="element-item-info">
                 <div class="element-item-name">${escapeHtml(el.type === 'text' ? (getElementText(el) || 'Text') : el.type === 'emoji' ? `${el.emoji} ${el.name}` : el.name)}</div>
-                <div class="element-item-layer">${escapeHtml(layerLabels[el.layer] || el.layer)}</div>
+                <div class="element-item-layer">${hiddenHere ? `Hidden in ${escapeHtml(languageNames[state.currentLanguage] || state.currentLanguage)}` : escapeHtml(layerLabels[el.layer] || el.layer)}</div>
             </div>
             <div class="element-item-actions">
                 <button class="element-item-btn" data-action="move-up" title="Move up">
@@ -2482,6 +2694,30 @@ function updateElementsList() {
     });
 }
 
+// "Show in languages" chips: one per project language, toggling el.hiddenLanguages
+function updateElementLanguageChips(el) {
+    const group = document.getElementById('element-languages-group');
+    const container = document.getElementById('element-languages');
+    if (!group || !container) return;
+    group.style.display = state.projectLanguages.length > 1 ? '' : 'none';
+    container.replaceChildren(...state.projectLanguages.map(lang => {
+        const chip = document.createElement('button');
+        const shown = !isElementHiddenIn(el, lang);
+        chip.className = 'language-chip' + (shown ? ' active' : '');
+        chip.textContent = `${languageFlags[lang] || ''} ${languageNames[lang] || lang}`.trim();
+        chip.title = shown ? 'Shown — click to hide in this language' : 'Hidden — click to show in this language';
+        chip.addEventListener('click', () => {
+            const hidden = new Set(el.hiddenLanguages || []);
+            if (hidden.has(lang)) hidden.delete(lang); else hidden.add(lang);
+            el.hiddenLanguages = [...hidden];
+            updateCanvas();
+            updateElementsList();
+            updateElementLanguageChips(el);
+        });
+        return chip;
+    }));
+}
+
 function updateElementProperties() {
     const propsEl = document.getElementById('element-properties');
     if (!propsEl) return;
@@ -2496,6 +2732,7 @@ function updateElementProperties() {
     const titleMap = { text: 'Text Element', emoji: `${el.emoji} Emoji`, icon: `Icon: ${el.name}`, graphic: el.name || 'Graphic' };
     document.getElementById('element-properties-title').textContent = titleMap[el.type] || el.name || 'Element';
 
+    updateElementLanguageChips(el);
     document.getElementById('element-layer').value = el.layer;
     document.getElementById('element-x').value = el.x;
     document.getElementById('element-x-value').textContent = formatValue(el.x) + '%';
@@ -2823,8 +3060,11 @@ function setupElementCanvasDrag() {
         const scaleY = previewCanvas.height / rect.height;
         const clientX = e.touches ? e.touches[0].clientX : e.clientX;
         const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+        const x = (clientX - rect.left) * scaleX;
         return {
-            x: (clientX - rect.left) * scaleX,
+            // In a mirrored (RTL) view, flip x so hit tests and drags operate on the
+            // stored left-to-right positions and still follow the pointer on screen
+            x: isMirroredLanguage() ? previewCanvas.width - x : x,
             y: (clientY - rect.top) * scaleY
         };
     }
@@ -2883,7 +3123,9 @@ function setupElementCanvasDrag() {
         // Test in reverse order (topmost first)
         const layers = ['above-text', 'above-screenshot', 'behind-screenshot'];
         for (const layer of layers) {
-            const layerEls = elements.filter(el => el.layer === layer).reverse();
+            const layerEls = elements
+                .filter(el => el.layer === layer && !isElementHiddenIn(el, state.currentLanguage))
+                .reverse();
             for (const el of layerEls) {
                 const cx = dims.width * (el.x / 100);
                 const cy = dims.height * (el.y / 100);
@@ -3333,8 +3575,9 @@ function updateCropPreview() {
     // Draw full image
     ctx2.drawImage(img, drawX, drawY, drawW, drawH);
 
-    // Dim overlay outside crop region
-    const rx = drawX + (p.cropX / 100) * drawW;
+    // Dim overlay outside crop region (showing the crop as it renders in this language)
+    const cropX = isMirroredLanguage() ? mirrorPopout(p).cropX : p.cropX;
+    const rx = drawX + (cropX / 100) * drawW;
     const ry = drawY + (p.cropY / 100) * drawH;
     const rw = (p.cropWidth / 100) * drawW;
     const rh = (p.cropHeight / 100) * drawH;
@@ -3394,8 +3637,17 @@ function setupCropPreviewDrag() {
         const scaleY = previewCanvas.height / rect.height;
         const clientX = e.touches ? e.touches[0].clientX : e.clientX;
         const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+        let x = (clientX - rect.left) * scaleX;
+        // The preview shows the mirrored crop in RTL views; flip input around the image
+        // center so hit tests and drags work on the stored crop
+        const screenshot = getCurrentScreenshot();
+        const img = screenshot && getScreenshotImage(screenshot);
+        if (img && isMirroredLanguage()) {
+            const { drawX, drawW } = getCropPreviewLayout(previewCanvas, img);
+            x = 2 * drawX + drawW - x;
+        }
         return {
-            x: (clientX - rect.left) * scaleX,
+            x,
             y: (clientY - rect.top) * scaleY
         };
     }
@@ -4073,6 +4325,9 @@ function setupEventListeners() {
     document.getElementById('export-all-languages').addEventListener('click', () => {
         closeExportLanguageDialog('all');
     });
+    document.getElementById('export-fastlane').addEventListener('click', () => {
+        closeExportLanguageDialog('fastlane');
+    });
     document.getElementById('export-language-modal-cancel').addEventListener('click', () => {
         closeExportLanguageDialog(null);
     });
@@ -4570,6 +4825,15 @@ function setupEventListeners() {
         updateCanvas();
     });
 
+    document.getElementById('language-layout-action').addEventListener('click', toggleLanguageLayout);
+    document.getElementById('language-font-reset').addEventListener('click', () => setLanguageFont(null));
+
+    // Mirror layout for right-to-left languages (project setting)
+    document.getElementById('mirror-rtl-toggle').addEventListener('click', function () {
+        state.mirrorRTL = this.classList.toggle('active');
+        updateCanvas();
+    });
+
     // Per-language layout toggle
     document.getElementById('per-language-layout-toggle').addEventListener('click', function () {
         this.classList.toggle('active');
@@ -4882,6 +5146,7 @@ function switchGlobalLanguage(lang) {
 function openLanguagesModal() {
     document.getElementById('language-menu').classList.remove('visible');
     document.getElementById('languages-modal').classList.add('visible');
+    document.getElementById('mirror-rtl-toggle').classList.toggle('active', state.mirrorRTL !== false);
     updateLanguagesList();
     updateAddLanguageSelect();
 }
@@ -4974,6 +5239,9 @@ function addProjectLanguage(lang) {
     updateLanguagesList();
     updateAddLanguageSelect();
     updateLanguageMenu();
+    // Language-specific controls only show once the project has several languages
+    updateLanguageFontControl();
+    updateLanguageLayoutPanel();
     saveState();
 }
 
@@ -5024,6 +5292,8 @@ function removeProjectLanguage(lang) {
         updateLanguagesList();
         updateAddLanguageSelect();
         updateLanguageMenu();
+        updateLanguageFontControl();
+        updateLanguageLayoutPanel();
         updateLanguageButton();
         syncUIWithState();
         saveState();
@@ -5131,7 +5401,7 @@ const languageNames = {
     'zh': 'Chinese (Simplified)', 'zh-tw': 'Chinese (Traditional)', 'ar': 'Arabic',
     'hi': 'Hindi', 'tr': 'Turkish', 'pl': 'Polish', 'sv': 'Swedish',
     'da': 'Danish', 'no': 'Norwegian', 'fi': 'Finnish', 'th': 'Thai',
-    'vi': 'Vietnamese', 'id': 'Indonesian', 'uk': 'Ukrainian'
+    'vi': 'Vietnamese', 'id': 'Indonesian', 'uk': 'Ukrainian', 'he': 'Hebrew'
 };
 
 function openTranslateModal(target) {
@@ -5181,7 +5451,7 @@ function openTranslateModal(target) {
                 <span class="flag">${languageFlags[lang]}</span>
                 <span>${escapeHtml(languageNames[lang] || lang)}</span>
             </div>
-            <textarea placeholder="Enter ${escapeHtml(languageNames[lang] || lang)} translation...">${escapeHtml(texts[lang] || '')}</textarea>
+            <textarea dir="auto" placeholder="Enter ${escapeHtml(languageNames[lang] || lang)} translation...">${escapeHtml(texts[lang] || '')}</textarea>
         `;
         targetsContainer.appendChild(item);
     });
@@ -6619,6 +6889,7 @@ function transferStyle(sourceIndex, targetIndex) {
 
     // Deep copy screenshot settings
     target.screenshot = JSON.parse(JSON.stringify(source.screenshot));
+    target.languageLayouts = JSON.parse(JSON.stringify(source.languageLayouts || {}));
 
     // Copy text styling but preserve actual text content
     const targetHeadlines = target.text.headlines;
@@ -6682,6 +6953,7 @@ function applyStyleToAll() {
 
         // Deep copy screenshot settings
         target.screenshot = JSON.parse(JSON.stringify(source.screenshot));
+        target.languageLayouts = JSON.parse(JSON.stringify(source.languageLayouts || {}));
 
         // Copy text styling but preserve actual text content
         const targetHeadlines = target.text.headlines;
@@ -6883,6 +7155,7 @@ function updateCanvas() {
 
     // Update side previews
     updateSidePreviews();
+    updateLanguageLayoutPanel();
 }
 
 function updateSidePreviews() {
@@ -6893,7 +7166,8 @@ function updateSidePreviews() {
     const previewScale = Math.min(maxPreviewWidth / dims.width, maxPreviewHeight / dims.height);
 
     // Initialize Three.js if any screenshot uses 3D mode (needed for side previews)
-    const any3D = state.screenshots.some(s => s.screenshot?.use3D);
+    const any3D = state.screenshots.some(s => s.screenshot?.use3D ||
+        Object.values(s.languageLayouts || {}).some(layout => layout.use3D));
     if (any3D && typeof showThreeJS === 'function') {
         showThreeJS(true);
 
@@ -7097,13 +7371,14 @@ function renderScreenshotToCanvas(index, targetCanvas, targetCtx, dims, previewS
         drawNoiseToContext(targetCtx, dims, bg.noiseIntensity);
     }
 
-    const elements = screenshot.elements || [];
+    const lang = state.currentLanguage;
+    const elements = resolveElements(screenshot.elements || [], lang);
 
     // Elements behind screenshot
     drawElementsToContext(targetCtx, dims, elements, 'behind-screenshot');
 
     // Draw screenshot - 3D if active for this screenshot, otherwise 2D
-    const settings = screenshot.screenshot;
+    const settings = resolveScreenshotSettings(screenshot, lang);
     const use3D = settings.use3D || false;
 
     if (img) {
@@ -7120,7 +7395,7 @@ function renderScreenshotToCanvas(index, targetCanvas, targetCtx, dims, previewS
     drawElementsToContext(targetCtx, dims, elements, 'above-screenshot');
 
     // Draw popouts
-    const popouts = screenshot.popouts || [];
+    const popouts = resolvePopouts(screenshot.popouts || [], lang);
     drawPopoutsToContext(targetCtx, dims, popouts, img, settings);
 
     // Draw text
@@ -7365,7 +7640,9 @@ function drawTextToContext(context, dims, txt) {
     // Draw headline
     if (headline) {
         const fontStyle = txt.headlineItalic ? 'italic' : 'normal';
-        context.font = `${fontStyle} ${txt.headlineWeight} ${headlineLayout.headlineSize}px ${txt.headlineFont}`;
+        context.font = `${fontStyle} ${txt.headlineWeight} ${headlineLayout.headlineSize}px ${getLanguageFont(headlineLang) || txt.headlineFont}`;
+        // Right-to-left base direction keeps punctuation and mixed Latin/numbers in the right order
+        context.direction = isRTL(headlineLang) ? 'rtl' : 'ltr';
         context.fillStyle = txt.headlineColor;
 
         const lines = wrapText(context, headline, dims.width - padding * 2);
@@ -7422,7 +7699,8 @@ function drawTextToContext(context, dims, txt) {
     if (subheadline) {
         const subFontStyle = txt.subheadlineItalic ? 'italic' : 'normal';
         const subWeight = txt.subheadlineWeight || '400';
-        context.font = `${subFontStyle} ${subWeight} ${subheadlineLayout.subheadlineSize}px ${txt.subheadlineFont || txt.headlineFont}`;
+        context.font = `${subFontStyle} ${subWeight} ${subheadlineLayout.subheadlineSize}px ${getLanguageFont(subheadlineLang) || txt.subheadlineFont || txt.headlineFont}`;
+        context.direction = isRTL(subheadlineLang) ? 'rtl' : 'ltr';
         context.fillStyle = hexToRgba(txt.subheadlineColor, txt.subheadlineOpacity / 100);
 
         const lines = wrapText(context, subheadline, dims.width - padding * 2);
@@ -7463,11 +7741,13 @@ function drawTextToContext(context, dims, txt) {
             context.textBaseline = 'bottom';
         }
     }
+
+    context.direction = 'ltr';
 }
 
 // Draw elements for the current screenshot at a specific layer
 function drawElements(context, dims, layer) {
-    const elements = getElements();
+    const elements = resolveElements(getElements(), state.currentLanguage);
     drawElementsToContext(context, dims, elements, layer);
 }
 
@@ -7523,7 +7803,8 @@ function drawElementsToContext(context, dims, elements, layer) {
             const elText = getElementText(el);
             if (!elText) { context.restore(); return; }
             const fontStyle = el.italic ? 'italic' : 'normal';
-            context.font = `${fontStyle} ${el.fontWeight} ${el.fontSize}px ${el.font}`;
+            context.font = `${fontStyle} ${el.fontWeight} ${el.fontSize}px ${getLanguageFont(state.currentLanguage) || el.font}`;
+            context.direction = isRTL(state.currentLanguage) ? 'rtl' : 'ltr';
             context.fillStyle = el.fontColor;
             context.textAlign = 'center';
             context.textBaseline = 'middle';
@@ -7555,9 +7836,8 @@ function drawPopouts(context, dims) {
     if (!screenshot) return;
     const img = getScreenshotImage(screenshot);
     if (!img) return;
-    const popouts = screenshot.popouts || [];
-    const ss = getScreenshotSettings();
-    drawPopoutsToContext(context, dims, popouts, img, ss);
+    const popouts = resolvePopouts(screenshot.popouts || [], state.currentLanguage);
+    drawPopoutsToContext(context, dims, popouts, img, getRenderScreenshotSettings());
 }
 
 function drawPopoutsToContext(context, dims, popouts, img, screenshotSettings) {
@@ -7753,11 +8033,11 @@ function drawScreenshot() {
     if (!screenshot) return;
     // Use localized image based on current language
     const img = getScreenshotImage(screenshot);
-    drawScreenshotToContext(ctx, getCanvasDimensions(), img, getScreenshotSettings());
+    drawScreenshotToContext(ctx, getCanvasDimensions(), img, getRenderScreenshotSettings());
 }
 
 function drawDeviceFrame(x, y, width, height) {
-    drawDeviceFrameToContext(ctx, x, y, width, height, getScreenshotSettings());
+    drawDeviceFrameToContext(ctx, x, y, width, height, getRenderScreenshotSettings());
 }
 
 function drawText() {
@@ -7843,22 +8123,15 @@ async function exportAll() {
         return;
     }
 
-    // Check if project has multiple languages configured
-    const hasMultipleLanguages = state.projectLanguages.length > 1;
-
-    if (hasMultipleLanguages) {
-        // Show language choice dialog
-        showExportLanguageDialog(async (choice) => {
-            if (choice === 'current') {
-                await exportAllForLanguage(state.currentLanguage);
-            } else if (choice === 'all') {
-                await exportAllLanguages();
-            }
-        });
-    } else {
-        // Only one language, export directly
-        await exportAllForLanguage(state.currentLanguage);
-    }
+    showExportLanguageDialog(async (choice) => {
+        if (choice === 'current') {
+            await exportAllForLanguage(state.currentLanguage);
+        } else if (choice === 'all') {
+            await exportAllLanguages();
+        } else if (choice === 'fastlane') {
+            await exportForFastlane();
+        }
+    });
 }
 
 // Show export progress modal
@@ -7881,56 +8154,66 @@ function hideExportProgress() {
 }
 
 // Export all screenshots for a specific language
-async function exportAllForLanguage(lang) {
+// App Store Connect locale (fastlane deliver folder name) for each app language code.
+// Codes checked against FastlaneCore::Languages::ALL_LANGUAGES.
+const fastlaneLocales = {
+    'en': 'en-US', 'en-gb': 'en-GB', 'de': 'de-DE', 'fr': 'fr-FR', 'es': 'es-ES',
+    'it': 'it', 'pt': 'pt-PT', 'pt-br': 'pt-BR', 'nl': 'nl-NL', 'ru': 'ru',
+    'ja': 'ja', 'ko': 'ko', 'zh': 'zh-Hans', 'zh-tw': 'zh-Hant', 'ar': 'ar-SA',
+    'hi': 'hi', 'tr': 'tr', 'pl': 'pl', 'sv': 'sv', 'da': 'da',
+    'no': 'no', 'fi': 'fi', 'th': 'th', 'vi': 'vi', 'id': 'id',
+    'uk': 'uk', 'he': 'he'
+};
+
+// Render every screenshot in each of `langs` and pass the PNG (base64) to
+// onImage(lang, index, base64). Temporarily switches the current language
+// (images and text) and restores the previous selection afterwards.
+async function renderScreenshotsForLanguages(langs, onImage) {
     const originalIndex = state.selectedIndex;
     const originalLang = state.currentLanguage;
-    const zip = new JSZip();
-    const total = state.screenshots.length;
-
-    // Show progress
-    const langName = languageNames[lang] || lang.toUpperCase();
-    showExportProgress('Exporting...', `Preparing ${langName} screenshots`, 0);
-
-    // Save original text languages for each screenshot
     const originalTextLangs = state.screenshots.map(s => ({
         headline: s.text.currentHeadlineLang,
         subheadline: s.text.currentSubheadlineLang
     }));
+    const total = langs.length * state.screenshots.length;
+    let completed = 0;
 
-    // Temporarily switch to the target language (images and text)
-    state.currentLanguage = lang;
-    state.screenshots.forEach(s => {
-        s.text.currentHeadlineLang = lang;
-        s.text.currentSubheadlineLang = lang;
-    });
+    try {
+        for (const lang of langs) {
+            const langName = languageNames[lang] || lang.toUpperCase();
+            state.currentLanguage = lang;
+            state.screenshots.forEach(s => {
+                s.text.currentHeadlineLang = lang;
+                s.text.currentSubheadlineLang = lang;
+            });
 
-    for (let i = 0; i < state.screenshots.length; i++) {
-        state.selectedIndex = i;
+            for (let i = 0; i < state.screenshots.length; i++) {
+                state.selectedIndex = i;
+                updateCanvas();
+
+                completed++;
+                const percent = Math.round((completed / total) * 90); // Reserve 10% for ZIP generation
+                showExportProgress('Exporting...', `${langName}: Screenshot ${i + 1} of ${state.screenshots.length}`, percent);
+
+                // Give 3D renders and freshly loaded fonts a moment to settle
+                await new Promise(resolve => setTimeout(resolve, 100));
+
+                const base64 = canvas.toDataURL('image/png').replace(/^data:image\/png;base64,/, '');
+                onImage(lang, i, base64);
+            }
+        }
+    } finally {
+        state.selectedIndex = originalIndex;
+        state.currentLanguage = originalLang;
+        state.screenshots.forEach((s, i) => {
+            s.text.currentHeadlineLang = originalTextLangs[i].headline;
+            s.text.currentSubheadlineLang = originalTextLangs[i].subheadline;
+        });
         updateCanvas();
-
-        // Update progress
-        const percent = Math.round(((i + 1) / total) * 90); // Reserve 10% for ZIP generation
-        showExportProgress('Exporting...', `Screenshot ${i + 1} of ${total}`, percent);
-
-        await new Promise(resolve => setTimeout(resolve, 100));
-
-        // Get canvas data as base64, strip the data URL prefix
-        const dataUrl = canvas.toDataURL('image/png');
-        const base64Data = dataUrl.replace(/^data:image\/png;base64,/, '');
-
-        zip.file(`screenshot-${i + 1}.png`, base64Data, { base64: true });
     }
+}
 
-    // Restore original settings
-    state.selectedIndex = originalIndex;
-    state.currentLanguage = originalLang;
-    state.screenshots.forEach((s, i) => {
-        s.text.currentHeadlineLang = originalTextLangs[i].headline;
-        s.text.currentSubheadlineLang = originalTextLangs[i].subheadline;
-    });
-    updateCanvas();
-
-    // Generate ZIP
+async function downloadZip(zip, filename) {
     showExportProgress('Generating ZIP...', '', 95);
     const content = await zip.generateAsync({ type: 'blob' });
 
@@ -7939,84 +8222,50 @@ async function exportAllForLanguage(lang) {
     hideExportProgress();
 
     const link = document.createElement('a');
-    link.download = `screenshots_${state.outputDevice}_${lang}.zip`;
+    link.download = filename;
     link.href = URL.createObjectURL(content);
     link.click();
-    URL.revokeObjectURL(link.href);
+    // Revoking synchronously can cancel the download in some browsers
+    setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+}
+
+async function exportAllForLanguage(lang) {
+    const zip = new JSZip();
+    await renderScreenshotsForLanguages([lang], (_lang, i, base64) => {
+        zip.file(`screenshot-${i + 1}.png`, base64, { base64: true });
+    });
+    await downloadZip(zip, `screenshots_${state.outputDevice}_${lang}.zip`);
 }
 
 // Export all screenshots for all languages (separate folders)
 async function exportAllLanguages() {
-    const originalIndex = state.selectedIndex;
-    const originalLang = state.currentLanguage;
     const zip = new JSZip();
+    await renderScreenshotsForLanguages(state.projectLanguages, (lang, i, base64) => {
+        zip.file(`${lang}/screenshot-${i + 1}.png`, base64, { base64: true });
+    });
+    await downloadZip(zip, `screenshots_${state.outputDevice}_all-languages.zip`);
+}
 
-    const totalLangs = state.projectLanguages.length;
-    const totalScreenshots = state.screenshots.length;
-    const totalItems = totalLangs * totalScreenshots;
-    let completedItems = 0;
-
-    // Show progress
-    showExportProgress('Exporting...', 'Preparing all languages', 0);
-
-    // Save original text languages for each screenshot
-    const originalTextLangs = state.screenshots.map(s => ({
-        headline: s.text.currentHeadlineLang,
-        subheadline: s.text.currentSubheadlineLang
-    }));
-
-    for (let langIdx = 0; langIdx < state.projectLanguages.length; langIdx++) {
-        const lang = state.projectLanguages[langIdx];
-        const langName = languageNames[lang] || lang.toUpperCase();
-
-        // Temporarily switch to this language (images and text)
-        state.currentLanguage = lang;
-        state.screenshots.forEach(s => {
-            s.text.currentHeadlineLang = lang;
-            s.text.currentSubheadlineLang = lang;
-        });
-
-        for (let i = 0; i < state.screenshots.length; i++) {
-            state.selectedIndex = i;
-            updateCanvas();
-
-            completedItems++;
-            const percent = Math.round((completedItems / totalItems) * 90); // Reserve 10% for ZIP
-            showExportProgress('Exporting...', `${langName}: Screenshot ${i + 1} of ${totalScreenshots}`, percent);
-
-            await new Promise(resolve => setTimeout(resolve, 100));
-
-            // Get canvas data as base64, strip the data URL prefix
-            const dataUrl = canvas.toDataURL('image/png');
-            const base64Data = dataUrl.replace(/^data:image\/png;base64,/, '');
-
-            // Use language code as folder name
-            zip.file(`${lang}/screenshot-${i + 1}.png`, base64Data, { base64: true });
-        }
+// Export all languages in the layout fastlane deliver expects:
+// screenshots/<App Store locale>/<NN>_<device>.png. deliver detects the display
+// type from the image size and uploads in filename order.
+async function exportForFastlane() {
+    if (!/^(iphone|ipad)-/.test(state.outputDevice)) {
+        await showAppAlert('fastlane export needs an iPhone or iPad output size. Pick one under Output Size first.', 'info');
+        return;
+    }
+    const unmapped = state.projectLanguages.filter(lang => !fastlaneLocales[lang]);
+    if (unmapped.length > 0) {
+        await showAppAlert(`No App Store locale is known for: ${unmapped.join(', ')}. Remove these languages or export them separately.`, 'error');
+        return;
     }
 
-    // Restore original settings
-    state.selectedIndex = originalIndex;
-    state.currentLanguage = originalLang;
-    state.screenshots.forEach((s, i) => {
-        s.text.currentHeadlineLang = originalTextLangs[i].headline;
-        s.text.currentSubheadlineLang = originalTextLangs[i].subheadline;
+    const zip = new JSZip();
+    await renderScreenshotsForLanguages(state.projectLanguages, (lang, i, base64) => {
+        const number = String(i + 1).padStart(2, '0');
+        zip.file(`screenshots/${fastlaneLocales[lang]}/${number}_${state.outputDevice}.png`, base64, { base64: true });
     });
-    updateCanvas();
-
-    // Generate ZIP
-    showExportProgress('Generating ZIP...', '', 95);
-    const content = await zip.generateAsync({ type: 'blob' });
-
-    showExportProgress('Complete!', '', 100);
-    await new Promise(resolve => setTimeout(resolve, 1500));
-    hideExportProgress();
-
-    const link = document.createElement('a');
-    link.download = `screenshots_${state.outputDevice}_all-languages.zip`;
-    link.href = URL.createObjectURL(content);
-    link.click();
-    URL.revokeObjectURL(link.href);
+    await downloadZip(zip, `fastlane_screenshots_${state.outputDevice}.zip`);
 }
 
 // ===== Emoji Picker (inline dropdown) =====

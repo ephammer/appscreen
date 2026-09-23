@@ -314,7 +314,7 @@ function loadPhoneModel() {
             // Apply initial settings from state
             if (typeof state !== 'undefined') {
                 updateThreeJSBackground();
-                const ss = typeof getScreenshotSettings === 'function' ? getScreenshotSettings() : state.defaults?.screenshot;
+                const ss = getDisplayScreenshotSettings();
                 const rotation3D = ss?.rotation3D || { x: 0, y: 0, z: 0 };
                 setThreeJSRotation(rotation3D.x, rotation3D.y, rotation3D.z);
 
@@ -430,7 +430,7 @@ function switchPhoneModel(deviceType) {
             // Apply settings
             if (typeof state !== 'undefined') {
                 updateThreeJSBackground();
-                const ss = typeof getScreenshotSettings === 'function' ? getScreenshotSettings() : state.defaults?.screenshot;
+                const ss = getDisplayScreenshotSettings();
                 const rotation3D = ss?.rotation3D || { x: 0, y: 0, z: 0 };
                 setThreeJSRotation(rotation3D.x, rotation3D.y, rotation3D.z);
 
@@ -748,7 +748,7 @@ function renderThreeJSToCanvas(targetCanvas, width, height) {
     // Apply position, scale, and rotation from screenshot settings
     if (typeof state !== 'undefined') {
         // Use getScreenshotSettings() helper if available, otherwise fall back to defaults
-        const ss = typeof getScreenshotSettings === 'function' ? getScreenshotSettings() : state.defaults?.screenshot;
+        const ss = getDisplayScreenshotSettings();
         if (ss) {
             // Scale: use screenshot.scale to adjust model size
             const screenshotScale = ss.scale / 100;
@@ -815,7 +815,10 @@ function renderThreeJSForScreenshot(targetCanvas, width, height, screenshotIndex
     if (typeof state === 'undefined' || !state.screenshots[screenshotIndex]) return;
 
     const screenshot = state.screenshots[screenshotIndex];
-    const ss = screenshot.screenshot;
+    // Settings as rendered in the current language (mirrored for RTL)
+    const ss = typeof resolveScreenshotSettings === 'function'
+        ? resolveScreenshotSettings(screenshot, state.currentLanguage)
+        : screenshot.screenshot;
     const dims = { width: width || 1290, height: height || 2796 };
 
     // Determine which device model this screenshot uses
@@ -994,7 +997,7 @@ function showThreeJS(show) {
     if (show && typeof state !== 'undefined') {
         updateThreeJSBackground();
         if (phoneModel) {
-            const ss = typeof getScreenshotSettings === 'function' ? getScreenshotSettings() : state.defaults?.screenshot;
+            const ss = getDisplayScreenshotSettings();
             const rotation3D = ss?.rotation3D || { x: 0, y: 0, z: 0 };
             setThreeJSRotation(rotation3D.x, rotation3D.y, rotation3D.z);
             updateScreenTexture();
@@ -1051,6 +1054,13 @@ let lastMouseX = 0;
 let lastMouseY = 0;
 let dragUpdatePending = false;
 
+// Device settings as displayed in the current language (mirrored for right-to-left
+// languages). Read-only: edits go through getScreenshotSettings().
+function getDisplayScreenshotSettings() {
+    if (typeof getRenderScreenshotSettings === 'function') return getRenderScreenshotSettings();
+    return typeof getScreenshotSettings === 'function' ? getScreenshotSettings() : state.defaults?.screenshot;
+}
+
 function getUse3D() {
     if (typeof getScreenshotSettings === 'function') {
         const ss = getScreenshotSettings();
@@ -1093,9 +1103,13 @@ function setup3DCanvasInteraction() {
         const ss = typeof getScreenshotSettings === 'function' ? getScreenshotSettings() : state.defaults?.screenshot;
         if (!ss) return;
 
+        // When the device is shown mirrored from the shared layout (RTL language without
+        // its own layout), invert horizontal movement so the phone follows the pointer
+        const dirX = typeof isDeviceMirrored === 'function' && isDeviceMirrored() ? -1 : 1;
+
         if (isAltDragging) {
             // Alt+drag: move position (x, y)
-            ss.x = Math.max(0, Math.min(100, ss.x + deltaX * 0.2));
+            ss.x = Math.max(0, Math.min(100, ss.x + dirX * deltaX * 0.2));
             ss.y = Math.max(0, Math.min(100, ss.y + deltaY * 0.2));
 
             // Update sliders
@@ -1107,7 +1121,7 @@ function setup3DCanvasInteraction() {
             // Regular drag: rotate
             if (!ss.rotation3D) ss.rotation3D = { x: 0, y: 0, z: 0 };
 
-            ss.rotation3D.y = Math.max(-45, Math.min(45, ss.rotation3D.y + deltaX * 0.5));
+            ss.rotation3D.y = Math.max(-45, Math.min(45, ss.rotation3D.y + dirX * deltaX * 0.5));
             ss.rotation3D.x = Math.max(-45, Math.min(45, ss.rotation3D.x + deltaY * 0.5));
 
             // Update sliders
@@ -1117,7 +1131,8 @@ function setup3DCanvasInteraction() {
             document.getElementById('rotation-3d-x-value').textContent = Math.round(ss.rotation3D.x) + '°';
 
             // Apply rotation directly to model (fast path - skip full updateCanvas)
-            setThreeJSRotation(ss.rotation3D.x, ss.rotation3D.y, ss.rotation3D.z);
+            const shown = getDisplayScreenshotSettings().rotation3D;
+            setThreeJSRotation(shown.x, shown.y, shown.z);
         }
 
         // Throttle updateCanvas calls using requestAnimationFrame

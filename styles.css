@@ -2295,6 +2295,61 @@ input[type="range"]::-webkit-slider-thumb {
     opacity: 0.8;
 }
 
+.language-layout-panel {
+    margin: 0 0 16px;
+}
+
+.language-layout-btn {
+    align-self: flex-start;
+    margin-top: 8px;
+    padding: 6px 10px;
+    background: transparent;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    color: var(--text-primary);
+    font-size: 12px;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.language-layout-btn:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+}
+
+.element-languages {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.language-chip {
+    padding: 4px 8px;
+    background: transparent;
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    color: var(--text-secondary);
+    font-size: 12px;
+    cursor: pointer;
+    opacity: 0.5;
+    text-decoration: line-through;
+}
+
+.language-chip.active {
+    border-color: var(--accent);
+    color: var(--text-primary);
+    opacity: 1;
+    text-decoration: none;
+}
+
+.element-item.hidden-in-language {
+    opacity: 0.5;
+}
+
+.mirror-rtl-setting {
+    margin-top: 16px;
+}
+
 /* Project controls */
 .project-controls {
     display: flex;
