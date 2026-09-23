@@ -99,3 +99,122 @@ function generateModelOptions(provider, selectedModel = null) {
         `<option value="${model.id}"${model.id === selected ? ' selected' : ''}>${model.name}</option>`
     ).join('\n');
 }
+
+/**
+ * Build the provider-specific request for a single-turn prompt with optional images
+ * @param {string} provider - Provider key
+ * @param {string} model - Model ID
+ * @param {string} apiKey - API key
+ * @param {string} prompt - Text prompt
+ * @param {Array} images - Array of { mimeType, base64 } objects
+ * @param {number} maxTokens - Output token limit
+ * @returns {{url: string, headers: Object, body: Object, extractText: Function}}
+ */
+function buildLLMRequest(provider, model, apiKey, prompt, images, maxTokens) {
+    switch (provider) {
+        case 'anthropic':
+            return {
+                url: 'https://api.anthropic.com/v1/messages',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'x-api-key': apiKey,
+                    'anthropic-version': '2023-06-01',
+                    'anthropic-dangerous-direct-browser-access': 'true'
+                },
+                body: {
+                    model,
+                    max_tokens: maxTokens,
+                    messages: [{
+                        role: 'user',
+                        content: [
+                            ...images.map(img => ({
+                                type: 'image',
+                                source: { type: 'base64', media_type: img.mimeType, data: img.base64 }
+                            })),
+                            { type: 'text', text: prompt }
+                        ]
+                    }]
+                },
+                extractText: data => data.content[0].text
+            };
+        case 'openai':
+            return {
+                url: 'https://api.openai.com/v1/chat/completions',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${apiKey}`
+                },
+                body: {
+                    model,
+                    // GPT-5 models spend completion tokens on reasoning before answering,
+                    // so leave headroom beyond the visible output
+                    max_completion_tokens: Math.max(maxTokens, 16384),
+                    messages: [{
+                        role: 'user',
+                        content: [
+                            ...images.map(img => ({
+                                type: 'image_url',
+                                image_url: { url: `data:${img.mimeType};base64,${img.base64}` }
+                            })),
+                            { type: 'text', text: prompt }
+                        ]
+                    }]
+                },
+                extractText: data => data.choices[0].message.content
+            };
+        case 'google':
+            return {
+                url: `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,
+                headers: {
+                    'Content-Type': 'application/json',
+                    // Header rather than ?key= so the key doesn't end up in URLs and logs
+                    'x-goog-api-key': apiKey
+                },
+                body: {
+                    contents: [{
+                        parts: [
+                            ...images.map(img => ({ inlineData: { mimeType: img.mimeType, data: img.base64 } })),
+                            { text: prompt }
+                        ]
+                    }]
+                },
+                extractText: data => data.candidates[0].content.parts[0].text
+            };
+        default:
+            throw new Error(`Unknown provider: ${provider}`);
+    }
+}
+
+/**
+ * Send a single-turn prompt (optionally with images) to a provider's API
+ * @param {string} provider - Provider key (anthropic, openai, google)
+ * @param {string} apiKey - API key
+ * @param {string} prompt - Text prompt
+ * @param {Object} [options]
+ * @param {Array} [options.images] - Array of { mimeType, base64 } objects
+ * @param {number} [options.maxTokens] - Output token limit
+ * @returns {Promise<string>} - Response text
+ * @throws {Error} 'AI_UNAVAILABLE' when the key is rejected
+ */
+async function callLLM(provider, apiKey, prompt, { images = [], maxTokens = 4096 } = {}) {
+    const model = getSelectedModel(provider);
+    const request = buildLLMRequest(provider, model, apiKey, prompt, images, maxTokens);
+
+    const response = await fetch(request.url, {
+        method: 'POST',
+        headers: request.headers,
+        body: JSON.stringify(request.body)
+    });
+
+    if (!response.ok) {
+        const status = response.status;
+        const errorBody = await response.json().catch(() => ({}));
+        console.error(`${llmProviders[provider].name} API error:`, { status, model, error: errorBody });
+        // Gemini reports an invalid key as 400
+        const authFailed = status === 401 || status === 403 || (provider === 'google' && status === 400);
+        if (authFailed) throw new Error('AI_UNAVAILABLE');
+        throw new Error(`API request failed: ${status} - ${errorBody.error?.message || 'Unknown error'}`);
+    }
+
+    return request.extractText(await response.json());
+}

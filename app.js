@@ -5347,15 +5347,7 @@ Example format:
 
 Translate to these language codes: ${targetLangs.join(', ')}`;
 
-        let responseText;
-
-        if (provider === 'anthropic') {
-            responseText = await translateWithAnthropic(apiKey, prompt);
-        } else if (provider === 'openai') {
-            responseText = await translateWithOpenAI(apiKey, prompt);
-        } else if (provider === 'google') {
-            responseText = await translateWithGoogle(apiKey, prompt);
-        }
+        let responseText = await callLLM(provider, apiKey, prompt);
 
         // Clean up response - remove markdown code blocks if present
         responseText = responseText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
@@ -5743,15 +5735,7 @@ Respond ONLY with a valid JSON object. The structure should be:
 Where the keys (0, 1, etc.) correspond to the text indices [N] shown above.
 Translate to these language codes: ${targetLangs.join(', ')}`;
 
-        let responseText;
-
-        if (provider === 'anthropic') {
-            responseText = await translateWithAnthropic(apiKey, prompt);
-        } else if (provider === 'openai') {
-            responseText = await translateWithOpenAI(apiKey, prompt);
-        } else if (provider === 'google') {
-            responseText = await translateWithGoogle(apiKey, prompt);
-        }
+        let responseText = await callLLM(provider, apiKey, prompt);
 
         updateStatus('Processing response...', 'Parsing translations');
 
@@ -5823,87 +5807,6 @@ Translate to these language codes: ${targetLangs.join(', ')}`;
             await showAppAlert('Translation failed: ' + error.message, 'error');
         }
     }
-}
-
-// Provider-specific translation functions
-async function translateWithAnthropic(apiKey, prompt) {
-    const model = getSelectedModel('anthropic');
-    const response = await fetch("https://api.anthropic.com/v1/messages", {
-        method: "POST",
-        headers: {
-            "Content-Type": "application/json",
-            "x-api-key": apiKey,
-            "anthropic-version": "2023-06-01",
-            "anthropic-dangerous-direct-browser-access": "true"
-        },
-        body: JSON.stringify({
-            model: model,
-            max_tokens: 4096,
-            messages: [{ role: "user", content: prompt }]
-        })
-    });
-
-    if (!response.ok) {
-        const status = response.status;
-        if (status === 401 || status === 403) throw new Error('AI_UNAVAILABLE');
-        throw new Error(`API request failed: ${status}`);
-    }
-
-    const data = await response.json();
-    return data.content[0].text;
-}
-
-async function translateWithOpenAI(apiKey, prompt) {
-    const model = getSelectedModel('openai');
-    const response = await fetch("https://api.openai.com/v1/chat/completions", {
-        method: "POST",
-        headers: {
-            "Content-Type": "application/json",
-            "Authorization": `Bearer ${apiKey}`
-        },
-        body: JSON.stringify({
-            model: model,
-            max_completion_tokens: 16384,
-            messages: [{ role: "user", content: prompt }]
-        })
-    });
-
-    if (!response.ok) {
-        const status = response.status;
-        const errorBody = await response.json().catch(() => ({}));
-        console.error('OpenAI API Error:', {
-            status,
-            model,
-            error: errorBody
-        });
-        if (status === 401 || status === 403) throw new Error('AI_UNAVAILABLE');
-        throw new Error(`API request failed: ${status} - ${errorBody.error?.message || 'Unknown error'}`);
-    }
-
-    const data = await response.json();
-    return data.choices[0].message.content;
-}
-
-async function translateWithGoogle(apiKey, prompt) {
-    const model = getSelectedModel('google');
-    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`, {
-        method: "POST",
-        headers: {
-            "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-            contents: [{ parts: [{ text: prompt }] }]
-        })
-    });
-
-    if (!response.ok) {
-        const status = response.status;
-        if (status === 401 || status === 403 || status === 400) throw new Error('AI_UNAVAILABLE');
-        throw new Error(`API request failed: ${status}`);
-    }
-
-    const data = await response.json();
-    return data.candidates[0].content.parts[0].text;
 }
 
 function setTranslateStatus(message, type) {
