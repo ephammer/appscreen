@@ -538,11 +538,12 @@
 
             <!-- Screenshot Tab -->
             <div class="tab-content" id="tab-screenshot">
-                <div id="layout-mirror-notice" class="tip-box layout-mirror-notice" style="display: none;">
+                <div id="language-layout-panel" class="tip-box language-layout-panel" style="display: none;">
                     <img src="img/info.svg" width="16" height="16" alt="Info">
                     <div class="tip-content">
-                        <strong id="layout-mirror-notice-title">Mirrored layout</strong>
-                        <span>Position and rotation edit the shared layout, which is shown flipped here.</span>
+                        <strong id="language-layout-title">Shared layout</strong>
+                        <span id="language-layout-desc"></span>
+                        <button class="language-layout-btn" id="language-layout-action">Customize</button>
                     </div>
                 </div>
                 <div class="control-group">
@@ -801,6 +802,37 @@
 
             <!-- Text Tab -->
             <div class="tab-content" id="tab-text">
+                <div class="control-group" id="language-font-group" style="display: none;">
+                    <label class="control-label" id="language-font-label">Font for this language</label>
+                    <div class="font-picker" id="language-font-picker">
+                        <button class="font-picker-trigger" id="language-font-picker-trigger">
+                            <span class="font-picker-preview" id="language-font-picker-preview">Same as headline</span>
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <polyline points="6 9 12 15 18 9"/>
+                            </svg>
+                        </button>
+                        <div class="font-picker-dropdown" id="language-font-picker-dropdown">
+                            <div class="font-picker-search">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <circle cx="11" cy="11" r="8"/>
+                                    <path d="M21 21l-4.35-4.35"/>
+                                </svg>
+                                <input type="text" id="language-font-search" placeholder="Search fonts..." autocomplete="off">
+                            </div>
+                            <div class="font-picker-categories">
+                                <button class="font-category active" data-category="popular">Popular</button>
+                                <button class="font-category" data-category="system">System</button>
+                                <button class="font-category" data-category="all">All</button>
+                            </div>
+                            <div class="font-picker-list" id="language-font-picker-list">
+                            </div>
+                        </div>
+                    </div>
+                    <input type="hidden" id="language-font" value="">
+                    <p class="hint-text" id="language-font-hint">Replaces the headline, subheadline and text element fonts in this language, across the project.</p>
+                    <button class="language-layout-btn" id="language-font-reset" style="display: none;">Use the regular fonts</button>
+                </div>
+
                 <div class="control-group">
                     <div class="toggle-row collapsible" data-target="headline-options">
                         <span class="toggle-label">
@@ -1099,6 +1131,11 @@
                 <div class="element-properties" id="element-properties" style="display: none;">
                     <div class="divider"></div>
                     <h3 class="element-properties-title" id="element-properties-title">Element</h3>
+
+                    <div class="control-group" id="element-languages-group">
+                        <label class="control-label">Show in languages</label>
+                        <div class="element-languages" id="element-languages"></div>
+                    </div>
 
                     <div class="control-group">
                         <label class="control-label">Layer</label>

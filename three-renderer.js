@@ -1103,9 +1103,9 @@ function setup3DCanvasInteraction() {
         const ss = typeof getScreenshotSettings === 'function' ? getScreenshotSettings() : state.defaults?.screenshot;
         if (!ss) return;
 
-        // In a mirrored (RTL) view the stored layout is flipped on screen, so invert
-        // horizontal movement to keep the phone following the pointer
-        const dirX = typeof isMirroredLanguage === 'function' && isMirroredLanguage() ? -1 : 1;
+        // When the device is shown mirrored from the shared layout (RTL language without
+        // its own layout), invert horizontal movement so the phone follows the pointer
+        const dirX = typeof isDeviceMirrored === 'function' && isDeviceMirrored() ? -1 : 1;
 
         if (isAltDragging) {
             // Alt+drag: move position (x, y)

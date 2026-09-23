@@ -7,10 +7,12 @@ const { loadScripts } = require('./load-script');
 const plain = value => JSON.parse(JSON.stringify(value));
 
 const ctx = loadScripts([], {
-    globals: { state: { currentLanguage: 'en', mirrorRTL: true } },
+    globals: { state: { currentLanguage: 'en', mirrorRTL: true, languageFonts: { he: "'Heebo', sans-serif" } } },
     fromAppJs: [
         'languageFlags', 'fastlaneLocales', 'rtlLanguages', 'isRTL', 'isMirroredLanguage',
-        'mirrorScreenshotSettings', 'mirrorElement', 'mirrorPopout'
+        'mirrorScreenshotSettings', 'mirrorElement', 'mirrorPopout',
+        'hasLanguageLayout', 'resolveScreenshotSettings', 'isElementHiddenIn', 'resolveElements',
+        'getLanguageFont'
     ]
 });
 
@@ -76,4 +78,30 @@ test('elements and popouts mirror position, rotation and crop', () => {
 
     const popout = plain(ctx.mirrorPopout({ x: 72, y: 70, rotation: -6, cropX: 70, cropWidth: 25, shadow: { x: 3 } }));
     assert.deepEqual(popout, { x: 28, y: 70, rotation: 6, cropX: 5, cropWidth: 25, shadow: { x: -3 } });
+});
+
+test('a language layout replaces the shared (or mirrored) device settings', () => {
+    const shared = { x: 30, rotation: 8 };
+    const hebrew = { x: 55, rotation: -8 };
+    const screenshot = { screenshot: shared, languageLayouts: { he: hebrew } };
+    assert.equal(ctx.resolveScreenshotSettings(screenshot, 'he'), hebrew);
+    assert.equal(ctx.resolveScreenshotSettings(screenshot, 'en'), shared);
+    assert.equal(ctx.resolveScreenshotSettings({ screenshot: shared }, 'he').x, 70); // mirrored
+    assert.ok(ctx.hasLanguageLayout(screenshot, 'he'));
+    assert.ok(!ctx.hasLanguageLayout(screenshot, 'de'));
+});
+
+test('elements hidden in a language are left out, the rest are mirrored for RTL', () => {
+    const elements = [
+        { id: 'badge', x: 80, hiddenLanguages: ['de'] },
+        { id: 'star', x: 20 }
+    ];
+    assert.deepEqual(Array.from(ctx.resolveElements(elements, 'de'), el => el.id), ['star']);
+    assert.deepEqual(Array.from(ctx.resolveElements(elements, 'fr'), el => el.id), ['badge', 'star']);
+    assert.deepEqual(Array.from(ctx.resolveElements(elements, 'he'), el => el.x), [20, 80]);
+});
+
+test('language fonts apply only to their language', () => {
+    assert.equal(ctx.getLanguageFont('he'), "'Heebo', sans-serif");
+    assert.equal(ctx.getLanguageFont('en'), null);
 });

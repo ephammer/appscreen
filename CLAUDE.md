@@ -51,7 +51,7 @@ npm test
 - `magical-titles.js` - AI-generated marketing titles from screenshots
 - `lucide-icons.js` - Emoji data and Lucide icon names for the Elements tab
 - `vendor/` - Vendored Three.js, GLTFLoader, OrbitControls and JSZip (see `vendor/README.md`)
-- `tests/` - Unit tests for the pure functions in `llm.js` and `language-utils.js`
+- `tests/` - Unit tests for pure functions in `llm.js`, `language-utils.js`, and the localization helpers in `app.js`
 
 **Key patterns in app.js:**
 
@@ -90,6 +90,15 @@ Elements and popouts are drawn in between, by layer. Each `drawX()` is a thin wr
 - `getScreenshotImage(screenshot)` - returns image for current language with fallback chain
 - `findScreenshotByBaseFilename()` - matches uploads to existing screenshots by base name
 - Duplicate detection shows dialog with Replace/Create New/Skip options when uploading matching files
+
+**Per-language layouts and RTL (in app.js):**
+- Stored positions always describe the shared left-to-right layout. Rendering goes through resolvers: `resolveScreenshotSettings(screenshot, lang)`, `resolveElements()`, `resolvePopouts()`, and `getRenderScreenshotSettings()` for the current screenshot. Draw from these, never from `screenshot.screenshot` directly
+- Right-to-left languages (`rtlLanguages`: `he`, `ar`) are mirrored at render time when `state.mirrorRTL` is on (default): device x/rotation/perspective/3D yaw, element and popout positions, popout crops. Headline, subheadline and text elements set `ctx.direction = 'rtl'`
+- In a mirrored view, canvas pointer x is flipped (`getCanvasCoords`, `getCropCanvasCoords`) so drags edit the stored layout; the 3D drag inverts x via `isDeviceMirrored()`
+- `screenshot.languageLayouts[lang]` is an optional full copy of the device settings for one language. `getScreenshotSettings()` and `setScreenshotSetting()` edit it when present, so all device controls work unchanged
+- `el.hiddenLanguages` hides an element per language; `state.languageFonts[lang]` overrides headline/subheadline/text element fonts per language (project-wide)
+
+**fastlane export:** `exportForFastlane()` writes `screenshots/<App Store locale>/<NN>_<device>.png` using `fastlaneLocales`. `renderScreenshotsForLanguages()` is the shared render loop for all ZIP exports.
 
 **UI Components:**
 - Right sidebar has three tabs: Background, Device, Text
