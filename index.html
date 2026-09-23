@@ -62,13 +62,14 @@
         }
     </script>
 
+    <!-- Third-party libraries are vendored (see vendor/README.md) so the desktop app works offline -->
     <!-- JSZip for ZIP downloads -->
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+    <script src="vendor/jszip.min.js"></script>
 
     <!-- Three.js for 3D mockups -->
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+    <script src="vendor/three.min.js"></script>
+    <script src="vendor/GLTFLoader.js"></script>
+    <script src="vendor/OrbitControls.js"></script>
 </head>
 <body>
     <div class="app-container">
@@ -151,14 +152,14 @@
                                 <path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/>
                             </svg>
                         </button>
-                        <button class="project-btn" id="export-project-btn" title="Export Project Backup">
+                        <button class="project-btn" id="export-project-btn" title="Back Up All Projects">
                             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                 <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
                                 <polyline points="7 10 12 15 17 10"/>
                                 <line x1="12" y1="15" x2="12" y2="3"/>
                             </svg>
                         </button>
-                        <button class="project-btn" id="import-project-btn" title="Import Project Backup">
+                        <button class="project-btn" id="import-project-btn" title="Import Projects from Backup">
                             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                 <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
                                 <polyline points="17 8 12 3 7 8"/>

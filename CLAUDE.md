@@ -32,30 +32,44 @@ npx serve .
 
 Open `http://localhost:8000` in browser. Opening `index.html` directly from filesystem will break persistence.
 
+Run the unit tests (Node's built-in runner, no dependencies to install):
+
+```bash
+npm test
+```
+
 ## Architecture
 
 **Main files:**
 
 - `index.html` - UI structure with modals for settings, about, project management, translations, and language selection
 - `styles.css` - Dark theme styling, responsive layout with CSS Grid (3-column: left sidebar, canvas, right sidebar)
-- `app.js` - All application logic (~4400 lines)
-- `three-renderer.js` - Three.js 3D rendering for iPhone mockups (~1000 lines)
-- `language-utils.js` - Language detection, localized image management, and translation dialogs (~500 lines)
+- `app.js` - All application logic (~8300 lines)
+- `three-renderer.js` - Three.js 3D rendering for iPhone mockups (~1150 lines)
+- `language-utils.js` - Language detection, localized image management, and translation dialogs (~550 lines)
+- `llm.js` - AI provider config and `callLLM()`, the single entry point for Claude/OpenAI/Gemini requests
+- `magical-titles.js` - AI-generated marketing titles from screenshots
+- `lucide-icons.js` - Emoji data and Lucide icon names for the Elements tab
+- `vendor/` - Vendored Three.js, GLTFLoader, OrbitControls and JSZip (see `vendor/README.md`)
+- `tests/` - Unit tests for the pure functions in `llm.js` and `language-utils.js`
 
 **Key patterns in app.js:**
 
 - `state` object at top holds all application state (screenshots, settings, text, background config)
 - `updateCanvas()` is the main render function - call after any state change
-- `saveState()` persists to IndexedDB, called automatically in `updateCanvas()`
+- `saveState()` persists to IndexedDB; `updateCanvas()` calls it debounced via `scheduleSave()`. Call `saveState()` directly (it flushes any pending save) before swapping out `state`
+- Escape any user- or import-controlled value with `escapeHtml()` before putting it in `innerHTML`
 - `syncUIWithState()` updates all UI controls to reflect current state
 - Project management uses IndexedDB with two stores: `projects` (data) and `meta` (project list)
 - Per-screenshot settings: each screenshot stores its own background, device, and text settings
 
 **Canvas rendering pipeline (in updateCanvas):**
 1. `drawBackground()` - gradient/solid/image with optional blur and overlay
-2. `drawScreenshot()` - positioned, scaled, rotated screenshot with shadow and border
-3. `drawText()` - headline and subheadline with multi-language support
-4. `drawNoise()` - optional noise texture overlay
+2. `drawNoise()` - optional noise over the background (fixed seeded pattern, so it doesn't change between redraws)
+3. `drawScreenshot()` - positioned, scaled, rotated screenshot with shadow and border (or the 3D phone)
+4. `drawText()` - headline and subheadline with multi-language support
+
+Elements and popouts are drawn in between, by layer. Each `drawX()` is a thin wrapper over `drawXToContext()`, which the side previews also use, so preview, side previews and export stay identical. Put drawing changes in the `*ToContext` functions.
 
 **3D rendering (in three-renderer.js):**
 - Uses Three.js with GLTFLoader for iPhone 15 Pro Max model
@@ -108,7 +122,8 @@ Open `http://localhost:8000` in browser. Opening `index.html` directly from file
 
 ## External Dependencies
 
-- **Three.js** (r128) - 3D rendering for device mockups
-- **GLTFLoader** - loads iPhone 3D model
-- **JSZip** - creates ZIP files for batch export
+- **Three.js** (r128, vendored) - 3D rendering for device mockups
+- **GLTFLoader** (vendored) - loads iPhone 3D model
+- **JSZip** (3.10.1, vendored) - creates ZIP files for batch export
+- **Lucide icons** - fetched from unpkg, pinned to `lucide-static@0.577.0` (`LUCIDE_VERSION` in app.js); 1.x removed the brand icons
 - **Google Fonts API** - font picker with 1500+ fonts

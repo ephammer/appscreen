@@ -385,11 +385,15 @@ function addTextElement() {
 }
 
 // ===== Lucide SVG loading & caching =====
+// Pinned: `@latest` moved to Lucide 1.x, which dropped the brand icons in LUCIDE_ALL.
+// 0.577.0 is the last release that has every icon in the list.
+const LUCIDE_VERSION = '0.577.0';
 const lucideSVGCache = new Map(); // name -> raw SVG text
+const lucideImageCache = new Map(); // "name|color|strokeWidth" -> Promise<Image>
 
 async function fetchLucideSVG(name) {
     if (lucideSVGCache.has(name)) return lucideSVGCache.get(name);
-    const url = `https://unpkg.com/lucide-static@latest/icons/${name}.svg`;
+    const url = `https://unpkg.com/lucide-static@${LUCIDE_VERSION}/icons/${encodeURIComponent(name)}.svg`;
     const resp = await fetch(url);
     if (!resp.ok) throw new Error(`Failed to fetch icon: ${name}`);
     const svgText = await resp.text();
@@ -403,17 +407,28 @@ function colorizeLucideSVG(svgText, color, strokeWidth) {
         .replace(/stroke-width="[^"]*"/g, `stroke-width="${strokeWidth}"`);
 }
 
-async function getLucideImage(name, color, strokeWidth) {
-    const rawSVG = await fetchLucideSVG(name);
-    const colorized = colorizeLucideSVG(rawSVG, color, strokeWidth);
-    const blob = new Blob([colorized], { type: 'image/svg+xml' });
-    const blobURL = URL.createObjectURL(blob);
-    return new Promise((resolve, reject) => {
-        const img = new Image();
-        img.onload = () => resolve(img);
-        img.onerror = reject;
-        img.src = blobURL;
-    });
+// Cached per icon/color/stroke so repeated renders reuse one blob URL instead of
+// leaking a new one each time. (Images are shared between elements by "apply style
+// to all", so revoking a URL when one element changes would break the others.)
+function getLucideImage(name, color, strokeWidth) {
+    const key = `${name}|${color}|${strokeWidth}`;
+    if (!lucideImageCache.has(key)) {
+        const promise = fetchLucideSVG(name).then(rawSVG => new Promise((resolve, reject) => {
+            const colorized = colorizeLucideSVG(rawSVG, color, strokeWidth);
+            const blobURL = URL.createObjectURL(new Blob([colorized], { type: 'image/svg+xml' }));
+            const img = new Image();
+            img.onload = () => resolve(img);
+            img.onerror = (e) => {
+                URL.revokeObjectURL(blobURL);
+                reject(e);
+            };
+            img.src = blobURL;
+        }));
+        // Don't cache failures, so a later attempt can retry
+        promise.catch(() => lucideImageCache.delete(key));
+        lucideImageCache.set(key, promise);
+    }
+    return lucideImageCache.get(key);
 }
 
 async function updateIconImage(el) {
@@ -421,6 +436,7 @@ async function updateIconImage(el) {
     try {
         el.image = await getLucideImage(el.iconName, el.iconColor, el.iconStrokeWidth);
         updateCanvas();
+        updateElementsList(); // refresh the thumbnail with the new color/stroke
     } catch (e) {
         console.error('Failed to update icon image:', e);
     }
@@ -496,6 +512,7 @@ async function addIconElement(iconName) {
     try {
         el.image = await getLucideImage(iconName, el.iconColor, el.iconStrokeWidth);
         updateCanvas();
+        updateElementsList(); // the list was built before the icon image existed
     } catch (e) {
         console.error('Failed to load icon:', e);
     }
@@ -1424,8 +1441,9 @@ function saveProjectsMeta() {
         const store = transaction.objectStore(META_STORE);
         store.put({ key: 'projects', value: projects });
         store.put({ key: 'currentProject', value: currentProjectId });
+        transaction.onabort = () => handleSaveError(transaction.error);
     } catch (e) {
-        console.error('Error saving projects meta:', e);
+        handleSaveError(e);
     }
 }
 
@@ -1584,9 +1602,39 @@ function saveState() {
         const transaction = db.transaction([PROJECTS_STORE], 'readwrite');
         const store = transaction.objectStore(PROJECTS_STORE);
         store.put(stateToSave);
+        transaction.oncomplete = () => { saveErrorShown = false; };
+        transaction.onabort = () => handleSaveError(transaction.error);
     } catch (e) {
-        console.error('Error saving state:', e);
+        handleSaveError(e);
     }
+
+    if (state.screenshots.length > 0) requestPersistentStorage();
+}
+
+// Tell the user when a save fails (e.g. storage quota exceeded) instead of silently
+// losing edits. Shown once per failure streak so every debounced save doesn't re-alert.
+let saveErrorShown = false;
+
+function handleSaveError(error) {
+    console.error('Error saving state:', error);
+    if (saveErrorShown) return;
+    saveErrorShown = true;
+    const message = error?.name === 'QuotaExceededError'
+        ? 'Browser storage is full, so your latest changes could not be saved. Export a backup, then delete unused projects or screenshots to free up space.'
+        : `Your latest changes could not be saved: ${error?.message || 'unknown error'}`;
+    showAppAlert(message, 'error');
+}
+
+// Ask the browser to exempt our IndexedDB data from eviction under storage pressure.
+// Requested once there is real content, since some browsers show a permission prompt.
+let persistentStorageRequested = false;
+
+function requestPersistentStorage() {
+    if (persistentStorageRequested || !navigator.storage?.persist) return;
+    persistentStorageRequested = true;
+    navigator.storage.persisted()
+        .then(persisted => persisted || navigator.storage.persist())
+        .catch(() => {});
 }
 
 // Migrate 3D positions from old formula to new formula
@@ -1623,6 +1671,7 @@ function reconstructElementImages(elements) {
                 .then(img => {
                     restored.image = img;
                     updateCanvas();
+                    updateElementsList();
                 })
                 .catch(e => console.error('Failed to reconstruct icon:', e));
         }
@@ -1682,9 +1731,35 @@ function loadState() {
                         }
                     }
 
+                    // Build a screenshot entry from its saved record, filling settings that older
+                    // saves lack with the migrated project-level settings
+                    const buildScreenshot = (s, image, localizedImages) => {
+                        const screenshotSettings = s.screenshot || JSON.parse(JSON.stringify(migratedScreenshot));
+                        if (needs3DMigration) {
+                            migrate3DPosition(screenshotSettings);
+                        }
+                        return {
+                            image,
+                            name: s.name,
+                            deviceType: s.deviceType,
+                            localizedImages,
+                            background: s.background || JSON.parse(JSON.stringify(migratedBackground)),
+                            screenshot: screenshotSettings,
+                            text: s.text || JSON.parse(JSON.stringify(migratedText)),
+                            elements: reconstructElementImages(s.elements),
+                            popouts: s.popouts || [],
+                            overrides: s.overrides || {}
+                        };
+                    };
+
                     if (parsed.screenshots && parsed.screenshots.length > 0) {
                         let loadedCount = 0;
                         const totalToLoad = parsed.screenshots.length;
+                        const screenshotLoaded = (index, entry) => {
+                            state.screenshots[index] = entry;
+                            loadedCount++;
+                            checkAllLoaded();
+                        };
 
                         parsed.screenshots.forEach((s, index) => {
                             // Check if we have new localized format or old single-image format
@@ -1692,73 +1767,39 @@ function loadState() {
 
                             if (!hasLocalizedImages && !s.src) {
                                 // Blank screen (no image)
-                                const screenshotSettings = s.screenshot || JSON.parse(JSON.stringify(migratedScreenshot));
-                                if (needs3DMigration) {
-                                    migrate3DPosition(screenshotSettings);
-                                }
-                                state.screenshots[index] = {
-                                    image: null,
-                                    name: s.name || 'Blank Screen',
-                                    deviceType: s.deviceType,
-                                    localizedImages: {},
-                                    background: s.background || JSON.parse(JSON.stringify(migratedBackground)),
-                                    screenshot: screenshotSettings,
-                                    text: s.text || JSON.parse(JSON.stringify(migratedText)),
-                                    elements: reconstructElementImages(s.elements),
-                                    popouts: s.popouts || [],
-                                    overrides: s.overrides || {}
-                                };
-                                loadedCount++;
-                                checkAllLoaded();
+                                screenshotLoaded(index, { ...buildScreenshot(s, null, {}), name: s.name || 'Blank Screen' });
                             } else if (hasLocalizedImages) {
-                                // New format: load all localized images
+                                // New format: load all localized images. Images that fail to decode are
+                                // skipped rather than stalling the whole project load.
                                 const langKeys = Object.keys(s.localizedImages);
-                                let langLoadedCount = 0;
                                 const localizedImages = {};
+                                let langSettled = 0;
+                                const langDone = () => {
+                                    if (++langSettled < langKeys.length) return;
+                                    const firstLang = langKeys[0];
+                                    screenshotLoaded(index, buildScreenshot(s, localizedImages[firstLang]?.image, localizedImages)); // image: legacy compat
+                                };
 
                                 langKeys.forEach(lang => {
                                     const langData = s.localizedImages[lang];
-                                    if (langData?.src) {
-                                        const langImg = new Image();
-                                        langImg.onload = () => {
-                                            localizedImages[lang] = {
-                                                image: langImg,
-                                                src: langData.src,
-                                                name: langData.name || s.name
-                                            };
-                                            langLoadedCount++;
-
-                                            if (langLoadedCount === langKeys.length) {
-                                                // All language versions loaded
-                                                const firstLang = langKeys[0];
-                                                const screenshotSettings = s.screenshot || JSON.parse(JSON.stringify(migratedScreenshot));
-                                                if (needs3DMigration) {
-                                                    migrate3DPosition(screenshotSettings);
-                                                }
-                                                state.screenshots[index] = {
-                                                    image: localizedImages[firstLang]?.image, // Legacy compat
-                                                    name: s.name,
-                                                    deviceType: s.deviceType,
-                                                    localizedImages: localizedImages,
-                                                    background: s.background || JSON.parse(JSON.stringify(migratedBackground)),
-                                                    screenshot: screenshotSettings,
-                                                    text: s.text || JSON.parse(JSON.stringify(migratedText)),
-                                                    elements: reconstructElementImages(s.elements),
-                                                    popouts: s.popouts || [],
-                                                    overrides: s.overrides || {}
-                                                };
-                                                loadedCount++;
-                                                checkAllLoaded();
-                                            }
-                                        };
-                                        langImg.src = langData.src;
-                                    } else {
-                                        langLoadedCount++;
-                                        if (langLoadedCount === langKeys.length) {
-                                            loadedCount++;
-                                            checkAllLoaded();
-                                        }
+                                    if (!langData?.src) {
+                                        langDone();
+                                        return;
                                     }
+                                    const langImg = new Image();
+                                    langImg.onload = () => {
+                                        localizedImages[lang] = {
+                                            image: langImg,
+                                            src: langData.src,
+                                            name: langData.name || s.name
+                                        };
+                                        langDone();
+                                    };
+                                    langImg.onerror = () => {
+                                        console.error(`Could not load ${lang} image for screenshot "${s.name}"`);
+                                        langDone();
+                                    };
+                                    langImg.src = langData.src;
                                 });
                             } else {
                                 // Old format: migrate to localized images
@@ -1775,25 +1816,11 @@ function loadState() {
                                         src: s.src,
                                         name: s.name
                                     };
-
-                                    const screenshotSettings = s.screenshot || JSON.parse(JSON.stringify(migratedScreenshot));
-                                    if (needs3DMigration) {
-                                        migrate3DPosition(screenshotSettings);
-                                    }
-                                    state.screenshots[index] = {
-                                        image: img,
-                                        name: s.name,
-                                        deviceType: s.deviceType,
-                                        localizedImages: localizedImages,
-                                        background: s.background || JSON.parse(JSON.stringify(migratedBackground)),
-                                        screenshot: screenshotSettings,
-                                        text: s.text || JSON.parse(JSON.stringify(migratedText)),
-                                        elements: reconstructElementImages(s.elements),
-                                        popouts: s.popouts || [],
-                                        overrides: s.overrides || {}
-                                    };
-                                    loadedCount++;
-                                    checkAllLoaded();
+                                    screenshotLoaded(index, buildScreenshot(s, img, localizedImages));
+                                };
+                                img.onerror = () => {
+                                    console.error(`Could not load image for screenshot "${s.name}"`);
+                                    screenshotLoaded(index, buildScreenshot(s, null, {}));
                                 };
                                 img.src = s.src;
                             }
@@ -1972,8 +1999,12 @@ function resetStateToDefaults() {
 
 // Switch to a different project
 async function switchProject(projectId) {
-    // Save current project first
-    saveState();
+    // Save current project first, unless it was just deleted (saving would write it back)
+    if (projects.some(p => p.id === currentProjectId)) {
+        saveState();
+    } else {
+        cancelPendingSave();
+    }
 
     currentProjectId = projectId;
     saveProjectsMeta();
@@ -3843,7 +3874,8 @@ function setupEventListeners() {
             a.href = URL.createObjectURL(blob);
             a.download = 'appscreen-backup-' + new Date().toISOString().slice(0, 10) + '.json';
             a.click();
-            URL.revokeObjectURL(a.href);
+            // Revoking synchronously can cancel the download in some browsers
+            setTimeout(() => URL.revokeObjectURL(a.href), 1000);
         } catch (e) {
             console.error('Export failed:', e);
             alert('Export failed: ' + e.message);
@@ -3891,24 +3923,44 @@ function setupEventListeners() {
         const file = e.target.files[0];
         if (!file || !db) return;
         try {
-            const text = await file.text();
-            const dump = JSON.parse(text);
+            const dump = JSON.parse(await file.text());
             validateBackup(dump);
-            // Don't let a pending save of the in-memory project overwrite the imported data
-            cancelPendingSave();
-            for (const storeName of Object.keys(dump)) {
-                if (!db.objectStoreNames.contains(storeName)) continue;
-                const tx = db.transaction(storeName, 'readwrite');
-                const store = tx.objectStore(storeName);
-                for (const record of dump[storeName]) {
-                    store.put(record);
+            // Persist pending edits to the open project before adding the imported ones
+            flushPendingSave();
+
+            // Merge into the existing project list instead of replacing it. Imported projects
+            // whose id is already taken get a fresh id, so no local project is overwritten.
+            // Only projects in the backup's list are imported (skips orphaned records).
+            const backupList = dump[META_STORE].find(r => r.key === 'projects')?.value || [];
+            const records = new Map(dump[PROJECTS_STORE].map(r => [r.id, r]));
+            const takenIds = new Set(projects.map(p => p.id));
+            const takenNames = new Set(projects.map(p => p.name));
+            const imported = backupList.map((entry, i) => {
+                let id = entry.id;
+                if (takenIds.has(id)) id = `project_${Date.now()}_${i}`;
+                let name = entry.name;
+                for (let n = 2; takenNames.has(name); n++) {
+                    name = `${entry.name} (imported${n > 2 ? ` ${n - 1}` : ''})`;
                 }
-                await new Promise((resolve, reject) => {
-                    tx.oncomplete = resolve;
-                    tx.onerror = () => reject(tx.error);
-                });
-            }
-            alert('Import complete! Reloading...');
+                takenIds.add(id);
+                takenNames.add(name);
+                const record = records.get(entry.id);
+                return { entry: { ...entry, id, name }, record: record && { ...record, id } };
+            });
+            if (imported.length === 0) throw new Error('Backup contains no projects');
+
+            const tx = db.transaction([PROJECTS_STORE, META_STORE], 'readwrite');
+            const projectStore = tx.objectStore(PROJECTS_STORE);
+            imported.forEach(({ record }) => { if (record) projectStore.put(record); });
+            const metaStore = tx.objectStore(META_STORE);
+            metaStore.put({ key: 'projects', value: [...projects, ...imported.map(p => p.entry)] });
+            metaStore.put({ key: 'currentProject', value: imported[0].entry.id });
+            await new Promise((resolve, reject) => {
+                tx.oncomplete = resolve;
+                tx.onabort = () => reject(tx.error);
+            });
+
+            alert(`Imported ${imported.length} project${imported.length !== 1 ? 's' : ''}. Reloading...`);
             location.reload();
         } catch (e) {
             console.error('Import failed:', e);
@@ -5276,15 +5328,7 @@ Example format:
 
 Translate to these language codes: ${targetLangs.join(', ')}`;
 
-        let responseText;
-
-        if (provider === 'anthropic') {
-            responseText = await translateWithAnthropic(apiKey, prompt);
-        } else if (provider === 'openai') {
-            responseText = await translateWithOpenAI(apiKey, prompt);
-        } else if (provider === 'google') {
-            responseText = await translateWithGoogle(apiKey, prompt);
-        }
+        let responseText = await callLLM(provider, apiKey, prompt);
 
         // Clean up response - remove markdown code blocks if present
         responseText = responseText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
@@ -5672,15 +5716,7 @@ Respond ONLY with a valid JSON object. The structure should be:
 Where the keys (0, 1, etc.) correspond to the text indices [N] shown above.
 Translate to these language codes: ${targetLangs.join(', ')}`;
 
-        let responseText;
-
-        if (provider === 'anthropic') {
-            responseText = await translateWithAnthropic(apiKey, prompt);
-        } else if (provider === 'openai') {
-            responseText = await translateWithOpenAI(apiKey, prompt);
-        } else if (provider === 'google') {
-            responseText = await translateWithGoogle(apiKey, prompt);
-        }
+        let responseText = await callLLM(provider, apiKey, prompt);
 
         updateStatus('Processing response...', 'Parsing translations');
 
@@ -5752,87 +5788,6 @@ Translate to these language codes: ${targetLangs.join(', ')}`;
             await showAppAlert('Translation failed: ' + error.message, 'error');
         }
     }
-}
-
-// Provider-specific translation functions
-async function translateWithAnthropic(apiKey, prompt) {
-    const model = getSelectedModel('anthropic');
-    const response = await fetch("https://api.anthropic.com/v1/messages", {
-        method: "POST",
-        headers: {
-            "Content-Type": "application/json",
-            "x-api-key": apiKey,
-            "anthropic-version": "2023-06-01",
-            "anthropic-dangerous-direct-browser-access": "true"
-        },
-        body: JSON.stringify({
-            model: model,
-            max_tokens: 4096,
-            messages: [{ role: "user", content: prompt }]
-        })
-    });
-
-    if (!response.ok) {
-        const status = response.status;
-        if (status === 401 || status === 403) throw new Error('AI_UNAVAILABLE');
-        throw new Error(`API request failed: ${status}`);
-    }
-
-    const data = await response.json();
-    return data.content[0].text;
-}
-
-async function translateWithOpenAI(apiKey, prompt) {
-    const model = getSelectedModel('openai');
-    const response = await fetch("https://api.openai.com/v1/chat/completions", {
-        method: "POST",
-        headers: {
-            "Content-Type": "application/json",
-            "Authorization": `Bearer ${apiKey}`
-        },
-        body: JSON.stringify({
-            model: model,
-            max_completion_tokens: 16384,
-            messages: [{ role: "user", content: prompt }]
-        })
-    });
-
-    if (!response.ok) {
-        const status = response.status;
-        const errorBody = await response.json().catch(() => ({}));
-        console.error('OpenAI API Error:', {
-            status,
-            model,
-            error: errorBody
-        });
-        if (status === 401 || status === 403) throw new Error('AI_UNAVAILABLE');
-        throw new Error(`API request failed: ${status} - ${errorBody.error?.message || 'Unknown error'}`);
-    }
-
-    const data = await response.json();
-    return data.choices[0].message.content;
-}
-
-async function translateWithGoogle(apiKey, prompt) {
-    const model = getSelectedModel('google');
-    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`, {
-        method: "POST",
-        headers: {
-            "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-            contents: [{ parts: [{ text: prompt }] }]
-        })
-    });
-
-    if (!response.ok) {
-        const status = response.status;
-        if (status === 401 || status === 403 || status === 400) throw new Error('AI_UNAVAILABLE');
-        throw new Error(`API request failed: ${status}`);
-    }
-
-    const data = await response.json();
-    return data.candidates[0].content.parts[0].text;
 }
 
 function setTranslateStatus(message, type) {
@@ -7242,16 +7197,38 @@ function drawBackgroundToContext(context, dims, bg) {
     }
 }
 
+// Noise uses a fixed seeded per-pixel pattern (cached per canvas size), so it doesn't
+// shimmer on every redraw and the side previews match the main canvas and export.
+let noisePatternCache = null;
+
+function getNoisePattern(pixelCount) {
+    if (!noisePatternCache || noisePatternCache.length !== pixelCount) {
+        const pattern = new Int8Array(pixelCount);
+        let seed = 0x9e3779b9;
+        for (let i = 0; i < pixelCount; i++) {
+            // mulberry32 PRNG
+            seed = (seed + 0x6D2B79F5) | 0;
+            let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+            t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+            pattern[i] = (((t ^ (t >>> 14)) >>> 0) % 255) - 127; // -127..127
+        }
+        noisePatternCache = pattern;
+    }
+    return noisePatternCache;
+}
+
 function drawNoiseToContext(context, dims, intensity) {
     const imageData = context.getImageData(0, 0, dims.width, dims.height);
-    const data = imageData.data;
-    const noiseAmount = intensity / 100;
+    const data = imageData.data; // Uint8ClampedArray: writes are clamped to 0-255
+    const pattern = getNoisePattern(data.length / 4);
+    // At 100% intensity each pixel shifts by up to ±25 per channel
+    const scale = (intensity / 100) * 50 / 254;
 
-    for (let i = 0; i < data.length; i += 4) {
-        const noise = (Math.random() - 0.5) * 255 * noiseAmount;
-        data[i] = Math.max(0, Math.min(255, data[i] + noise));
-        data[i + 1] = Math.max(0, Math.min(255, data[i + 1] + noise));
-        data[i + 2] = Math.max(0, Math.min(255, data[i + 2] + noise));
+    for (let i = 0, p = 0; i < data.length; i += 4, p++) {
+        const noise = pattern[p] * scale;
+        data[i] += noise;
+        data[i + 1] += noise;
+        data[i + 2] += noise;
     }
 
     context.putImageData(imageData, 0, 0);
@@ -7309,7 +7286,7 @@ function drawScreenshotToContext(context, dims, img, settings) {
         // Draw filled rounded rect for shadow
         context.fillStyle = '#000';
         context.beginPath();
-        context.roundRect(x, y, imgWidth, imgHeight, radius);
+        roundRect(context, x, y, imgWidth, imgHeight, radius);
         context.fill();
 
         // Reset shadow before drawing image
@@ -7321,7 +7298,7 @@ function drawScreenshotToContext(context, dims, img, settings) {
 
     // Clip and draw image
     context.beginPath();
-    context.roundRect(x, y, imgWidth, imgHeight, radius);
+    roundRect(context, x, y, imgWidth, imgHeight, radius);
     context.clip();
     context.drawImage(img, x, y, imgWidth, imgHeight);
 
@@ -7353,7 +7330,7 @@ function drawDeviceFrameToContext(context, x, y, width, height, settings) {
     context.strokeStyle = frameColor;
     context.lineWidth = frameWidth;
     context.beginPath();
-    context.roundRect(x - frameWidth / 2, y - frameWidth / 2, width + frameWidth, height + frameWidth, radius);
+    roundRect(context, x - frameWidth / 2, y - frameWidth / 2, width + frameWidth, height + frameWidth, radius);
     context.stroke();
     context.globalAlpha = 1;
 }
@@ -7765,338 +7742,30 @@ function drawStar(context, cx, cy, size, color) {
     context.restore();
 }
 
+// Main-canvas wrappers: the drawing itself lives in the *ToContext functions, which
+// the side previews also use, so the preview, side previews and export can't drift apart.
 function drawBackground() {
-    const dims = getCanvasDimensions();
-    const bg = getBackground();
-
-    if (bg.type === 'gradient') {
-        const angle = bg.gradient.angle * Math.PI / 180;
-        const x1 = dims.width / 2 - Math.cos(angle) * dims.width;
-        const y1 = dims.height / 2 - Math.sin(angle) * dims.height;
-        const x2 = dims.width / 2 + Math.cos(angle) * dims.width;
-        const y2 = dims.height / 2 + Math.sin(angle) * dims.height;
-
-        const gradient = ctx.createLinearGradient(x1, y1, x2, y2);
-        bg.gradient.stops.forEach(stop => {
-            gradient.addColorStop(stop.position / 100, stop.color);
-        });
-
-        ctx.fillStyle = gradient;
-        ctx.fillRect(0, 0, dims.width, dims.height);
-    } else if (bg.type === 'solid') {
-        ctx.fillStyle = bg.solid;
-        ctx.fillRect(0, 0, dims.width, dims.height);
-    } else if (bg.type === 'image' && bg.image) {
-        const img = bg.image;
-        let sx = 0, sy = 0, sw = img.width, sh = img.height;
-        let dx = 0, dy = 0, dw = dims.width, dh = dims.height;
-
-        if (bg.imageFit === 'cover') {
-            const imgRatio = img.width / img.height;
-            const canvasRatio = dims.width / dims.height;
-
-            if (imgRatio > canvasRatio) {
-                sw = img.height * canvasRatio;
-                sx = (img.width - sw) / 2;
-            } else {
-                sh = img.width / canvasRatio;
-                sy = (img.height - sh) / 2;
-            }
-        } else if (bg.imageFit === 'contain') {
-            const imgRatio = img.width / img.height;
-            const canvasRatio = dims.width / dims.height;
-
-            if (imgRatio > canvasRatio) {
-                dh = dims.width / imgRatio;
-                dy = (dims.height - dh) / 2;
-            } else {
-                dw = dims.height * imgRatio;
-                dx = (dims.width - dw) / 2;
-            }
-
-            ctx.fillStyle = '#000';
-            ctx.fillRect(0, 0, dims.width, dims.height);
-        }
-
-        if (bg.imageBlur > 0) {
-            ctx.filter = `blur(${bg.imageBlur}px)`;
-        }
-
-        ctx.drawImage(img, sx, sy, sw, sh, dx, dy, dw, dh);
-        ctx.filter = 'none';
-
-        // Overlay
-        if (bg.overlayOpacity > 0) {
-            ctx.fillStyle = bg.overlayColor;
-            ctx.globalAlpha = bg.overlayOpacity / 100;
-            ctx.fillRect(0, 0, dims.width, dims.height);
-            ctx.globalAlpha = 1;
-        }
-    }
+    drawBackgroundToContext(ctx, getCanvasDimensions(), getBackground());
 }
 
 function drawScreenshot() {
-    const dims = getCanvasDimensions();
     const screenshot = state.screenshots[state.selectedIndex];
     if (!screenshot) return;
-
     // Use localized image based on current language
     const img = getScreenshotImage(screenshot);
-    if (!img) return;
-
-    const settings = getScreenshotSettings();
-    const scale = settings.scale / 100;
-
-    // Calculate scaled dimensions
-    let imgWidth = dims.width * scale;
-    let imgHeight = (img.height / img.width) * imgWidth;
-
-    // If image is taller than canvas after scaling, adjust
-    if (imgHeight > dims.height * scale) {
-        imgHeight = dims.height * scale;
-        imgWidth = (img.width / img.height) * imgHeight;
-    }
-
-    // Ensure minimum movement range so position works even at 100% scale
-    const moveX = Math.max(dims.width - imgWidth, dims.width * 0.15);
-    const moveY = Math.max(dims.height - imgHeight, dims.height * 0.15);
-    const x = (dims.width - imgWidth) / 2 + (settings.x / 100 - 0.5) * moveX;
-    const y = (dims.height - imgHeight) / 2 + (settings.y / 100 - 0.5) * moveY;
-
-    // Center point for transformations
-    const centerX = x + imgWidth / 2;
-    const centerY = y + imgHeight / 2;
-
-    ctx.save();
-
-    // Apply transformations
-    ctx.translate(centerX, centerY);
-
-    // Apply rotation
-    if (settings.rotation !== 0) {
-        ctx.rotate(settings.rotation * Math.PI / 180);
-    }
-
-    // Apply perspective (simulated with scale transform)
-    if (settings.perspective !== 0) {
-        const perspectiveScale = 1 - Math.abs(settings.perspective) * 0.005;
-        ctx.transform(1, settings.perspective * 0.01, 0, 1, 0, 0);
-    }
-
-    ctx.translate(-centerX, -centerY);
-
-    // Draw rounded rectangle with screenshot
-    const radius = settings.cornerRadius * (imgWidth / 400); // Scale radius with image
-
-    // Draw shadow first (needs a filled shape, not clipped)
-    if (settings.shadow.enabled) {
-        const shadowColor = hexToRgba(settings.shadow.color, settings.shadow.opacity / 100);
-        ctx.shadowColor = shadowColor;
-        ctx.shadowBlur = settings.shadow.blur;
-        ctx.shadowOffsetX = settings.shadow.x;
-        ctx.shadowOffsetY = settings.shadow.y;
-
-        // Draw filled rounded rect for shadow
-        ctx.fillStyle = '#000';
-        ctx.beginPath();
-        roundRect(ctx, x, y, imgWidth, imgHeight, radius);
-        ctx.fill();
-
-        // Reset shadow before drawing image
-        ctx.shadowColor = 'transparent';
-        ctx.shadowBlur = 0;
-        ctx.shadowOffsetX = 0;
-        ctx.shadowOffsetY = 0;
-    }
-
-    // Clip and draw image
-    ctx.beginPath();
-    roundRect(ctx, x, y, imgWidth, imgHeight, radius);
-    ctx.clip();
-    ctx.drawImage(img, x, y, imgWidth, imgHeight);
-
-    ctx.restore();
-
-    // Draw device frame if enabled (needs separate transform context)
-    if (settings.frame.enabled) {
-        ctx.save();
-        ctx.translate(centerX, centerY);
-        if (settings.rotation !== 0) {
-            ctx.rotate(settings.rotation * Math.PI / 180);
-        }
-        if (settings.perspective !== 0) {
-            ctx.transform(1, settings.perspective * 0.01, 0, 1, 0, 0);
-        }
-        ctx.translate(-centerX, -centerY);
-        drawDeviceFrame(x, y, imgWidth, imgHeight);
-        ctx.restore();
-    }
+    drawScreenshotToContext(ctx, getCanvasDimensions(), img, getScreenshotSettings());
 }
 
 function drawDeviceFrame(x, y, width, height) {
-    const settings = getScreenshotSettings();
-    const frameColor = settings.frame.color;
-    const frameWidth = settings.frame.width * (width / 400); // Scale with image
-    const frameOpacity = settings.frame.opacity / 100;
-    const radius = settings.cornerRadius * (width / 400) + frameWidth;
-
-    ctx.globalAlpha = frameOpacity;
-    ctx.strokeStyle = frameColor;
-    ctx.lineWidth = frameWidth;
-    ctx.beginPath();
-    roundRect(ctx, x - frameWidth / 2, y - frameWidth / 2, width + frameWidth, height + frameWidth, radius);
-    ctx.stroke();
-    ctx.globalAlpha = 1;
+    drawDeviceFrameToContext(ctx, x, y, width, height, getScreenshotSettings());
 }
 
 function drawText() {
-    const dims = getCanvasDimensions();
-    const text = getTextSettings();
-
-    // Check enabled states (default headline to true for backwards compatibility)
-    const headlineEnabled = text.headlineEnabled !== false;
-    const subheadlineEnabled = text.subheadlineEnabled || false;
-
-    const headlineLang = text.currentHeadlineLang || 'en';
-    const subheadlineLang = text.currentSubheadlineLang || 'en';
-    const layoutLang = getTextLayoutLanguage(text);
-    const headlineLayout = getEffectiveLayout(text, headlineLang);
-    const subheadlineLayout = getEffectiveLayout(text, subheadlineLang);
-    const layoutSettings = getEffectiveLayout(text, layoutLang);
-
-    // Get current language text (only if enabled)
-    const headline = headlineEnabled && text.headlines ? (text.headlines[headlineLang] || '') : '';
-    const subheadline = subheadlineEnabled && text.subheadlines ? (text.subheadlines[subheadlineLang] || '') : '';
-
-    if (!headline && !subheadline) return;
-
-    const padding = dims.width * 0.08;
-    const textY = layoutSettings.position === 'top'
-        ? dims.height * (layoutSettings.offsetY / 100)
-        : dims.height * (1 - layoutSettings.offsetY / 100);
-
-    ctx.textAlign = 'center';
-    ctx.textBaseline = layoutSettings.position === 'top' ? 'top' : 'bottom';
-
-    let currentY = textY;
-
-    // Draw headline
-    if (headline) {
-        const fontStyle = text.headlineItalic ? 'italic' : 'normal';
-        ctx.font = `${fontStyle} ${text.headlineWeight} ${headlineLayout.headlineSize}px ${text.headlineFont}`;
-        ctx.fillStyle = text.headlineColor;
-
-        const lines = wrapText(ctx, headline, dims.width - padding * 2);
-        const lineHeight = headlineLayout.headlineSize * (layoutSettings.lineHeight / 100);
-
-        if (layoutSettings.position === 'bottom') {
-            currentY -= (lines.length - 1) * lineHeight;
-        }
-
-        let lastLineY;
-        lines.forEach((line, i) => {
-            const y = currentY + i * lineHeight;
-            lastLineY = y;
-            ctx.fillText(line, dims.width / 2, y);
-
-            // Calculate text metrics for decorations
-            // When textBaseline is 'top', y is at top of text; when 'bottom', y is at bottom
-            const textWidth = ctx.measureText(line).width;
-            const fontSize = headlineLayout.headlineSize;
-            const lineThickness = Math.max(2, fontSize * 0.05);
-            const x = dims.width / 2 - textWidth / 2;
-
-            // Draw underline
-            if (text.headlineUnderline) {
-                const underlineY = layoutSettings.position === 'top'
-                    ? y + fontSize * 0.9  // Below text when baseline is top
-                    : y + fontSize * 0.1; // Below text when baseline is bottom
-                ctx.fillRect(x, underlineY, textWidth, lineThickness);
-            }
-
-            // Draw strikethrough
-            if (text.headlineStrikethrough) {
-                const strikeY = layoutSettings.position === 'top'
-                    ? y + fontSize * 0.4  // Middle of text when baseline is top
-                    : y - fontSize * 0.4; // Middle of text when baseline is bottom
-                ctx.fillRect(x, strikeY, textWidth, lineThickness);
-            }
-        });
-
-        // Track where subheadline should start (below the bottom edge of headline)
-        // The gap between headline and subheadline should be (lineHeight - fontSize)
-        // This is the "extra" spacing beyond the text itself
-        const gap = lineHeight - headlineLayout.headlineSize;
-        if (layoutSettings.position === 'top') {
-            // For top: lastLineY is top of last line, add fontSize to get bottom, then add gap
-            currentY = lastLineY + headlineLayout.headlineSize + gap;
-        } else {
-            // For bottom: lastLineY is already the bottom of last line, just add gap
-            currentY = lastLineY + gap;
-        }
-    }
-
-    // Draw subheadline (always below headline visually)
-    if (subheadline) {
-        const subFontStyle = text.subheadlineItalic ? 'italic' : 'normal';
-        const subWeight = text.subheadlineWeight || '400';
-        ctx.font = `${subFontStyle} ${subWeight} ${subheadlineLayout.subheadlineSize}px ${text.subheadlineFont || text.headlineFont}`;
-        ctx.fillStyle = hexToRgba(text.subheadlineColor, text.subheadlineOpacity / 100);
-
-        const lines = wrapText(ctx, subheadline, dims.width - padding * 2);
-        const subLineHeight = subheadlineLayout.subheadlineSize * 1.4;
-
-        // Subheadline starts after headline with gap determined by headline lineHeight
-        // For bottom position, switch to 'top' baseline so subheadline draws downward
-        const subY = currentY;
-        if (layoutSettings.position === 'bottom') {
-            ctx.textBaseline = 'top';
-        }
-
-        lines.forEach((line, i) => {
-            const y = subY + i * subLineHeight;
-            ctx.fillText(line, dims.width / 2, y);
-
-            // Calculate text metrics for decorations
-            const textWidth = ctx.measureText(line).width;
-            const fontSize = subheadlineLayout.subheadlineSize;
-            const lineThickness = Math.max(2, fontSize * 0.05);
-            const x = dims.width / 2 - textWidth / 2;
-
-            // Draw underline (using 'top' baseline for subheadline)
-            if (text.subheadlineUnderline) {
-                const underlineY = y + fontSize * 0.9;
-                ctx.fillRect(x, underlineY, textWidth, lineThickness);
-            }
-
-            // Draw strikethrough
-            if (text.subheadlineStrikethrough) {
-                const strikeY = y + fontSize * 0.4;
-                ctx.fillRect(x, strikeY, textWidth, lineThickness);
-            }
-        });
-
-        // Restore baseline if we changed it
-        if (layoutSettings.position === 'bottom') {
-            ctx.textBaseline = 'bottom';
-        }
-    }
+    drawTextToContext(ctx, getCanvasDimensions(), getTextSettings());
 }
 
 function drawNoise() {
-    const dims = getCanvasDimensions();
-    const imageData = ctx.getImageData(0, 0, dims.width, dims.height);
-    const data = imageData.data;
-    const intensity = getBackground().noiseIntensity / 100 * 50;
-
-    for (let i = 0; i < data.length; i += 4) {
-        const noise = (Math.random() - 0.5) * intensity;
-        data[i] = Math.min(255, Math.max(0, data[i] + noise));
-        data[i + 1] = Math.min(255, Math.max(0, data[i + 1] + noise));
-        data[i + 2] = Math.min(255, Math.max(0, data[i + 2] + noise));
-    }
-
-    ctx.putImageData(imageData, 0, 0);
+    drawNoiseToContext(ctx, getCanvasDimensions(), getBackground().noiseIntensity);
 }
 
 function roundRect(ctx, x, y, width, height, radius) {
@@ -8472,13 +8141,15 @@ const iconImageObserver = typeof IntersectionObserver !== 'undefined' ? new Inte
 async function loadIconPreview(item, name) {
     try {
         const svgText = await fetchLucideSVG(name);
-        const colorized = colorizeLucideSVG(svgText, 'currentColor', 2);
-        item.innerHTML = colorized;
-        const svg = item.querySelector('svg');
-        if (svg) {
-            svg.style.width = '20px';
-            svg.style.height = '20px';
-        }
+        // Render as an <img> rather than injecting the fetched markup into the DOM,
+        // so remote SVG content can never run script. Bake in the current text color
+        // since `currentColor` doesn't inherit into an image.
+        const color = getComputedStyle(item).color;
+        const colorized = colorizeLucideSVG(svgText, color, 2);
+        const img = document.createElement('img');
+        img.alt = name;
+        img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(colorized);
+        item.replaceChildren(img);
     } catch (e) {
         item.innerHTML = `<span style="font-size: 9px; color: var(--text-tertiary);">${escapeHtml(name)}</span>`;
     }
