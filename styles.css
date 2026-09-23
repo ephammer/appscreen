@@ -2354,6 +2354,9 @@ input[type="range"]::-webkit-slider-thumb {
 
 .bezel-colors .language-chip {
     text-transform: capitalize;
+    /* Unselected colors are available choices, not hidden ones */
+    text-decoration: none;
+    opacity: 1;
 }
 
 .mirror-rtl-setting {
