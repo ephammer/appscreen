@@ -6,6 +6,7 @@ const state = {
     outputDevice: 'iphone-6.9',
     currentLanguage: 'en', // Global current language for all text
     projectLanguages: ['en'], // Languages available in this project
+    mirrorRTL: true, // Mirror the layout horizontally for right-to-left languages
     customWidth: 1290,
     customHeight: 2796,
     // Default settings applied to new screenshots
@@ -221,6 +222,83 @@ function getElements() {
 function getSelectedElement() {
     if (!selectedElementId) return null;
     return getElements().find(el => el.id === selectedElementId) || null;
+}
+
+// ===== Right-to-left languages and mirrored layouts =====
+// Stored positions always describe the shared left-to-right layout. For right-to-left
+// languages the layout is mirrored horizontally at render time (unless turned off per
+// project), so a design made once in English flips itself for Hebrew.
+const rtlLanguages = new Set(['he', 'ar']);
+
+function isRTL(lang) {
+    return rtlLanguages.has(lang);
+}
+
+function isMirroredLanguage(lang = state.currentLanguage) {
+    return state.mirrorRTL !== false && isRTL(lang);
+}
+
+function mirrorScreenshotSettings(ss) {
+    const mirrored = {
+        ...ss,
+        x: 100 - ss.x,
+        rotation: -(ss.rotation || 0),
+        perspective: -(ss.perspective || 0)
+    };
+    if (ss.shadow) mirrored.shadow = { ...ss.shadow, x: -(ss.shadow.x || 0) };
+    if (ss.rotation3D) mirrored.rotation3D = { ...ss.rotation3D, y: -ss.rotation3D.y, z: -ss.rotation3D.z };
+    return mirrored;
+}
+
+function mirrorElement(el) {
+    const mirrored = { ...el, x: 100 - el.x, rotation: -(el.rotation || 0) };
+    if (el.iconShadow) mirrored.iconShadow = { ...el.iconShadow, x: -(el.iconShadow.x || 0) };
+    return mirrored;
+}
+
+function mirrorPopout(p) {
+    const mirrored = {
+        ...p,
+        x: 100 - p.x,
+        rotation: -(p.rotation || 0),
+        // The localized screenshot's UI is itself mirrored, so mirror the crop region too
+        cropX: 100 - p.cropX - p.cropWidth
+    };
+    if (p.shadow) mirrored.shadow = { ...p.shadow, x: -(p.shadow.x || 0) };
+    return mirrored;
+}
+
+// Device settings as rendered for `lang`
+function resolveScreenshotSettings(screenshot, lang) {
+    const ss = screenshot.screenshot;
+    return isMirroredLanguage(lang) ? mirrorScreenshotSettings(ss) : ss;
+}
+
+function resolveElements(elements, lang) {
+    return isMirroredLanguage(lang) ? elements.map(mirrorElement) : elements;
+}
+
+function resolvePopouts(popouts, lang) {
+    return isMirroredLanguage(lang) ? popouts.map(mirrorPopout) : popouts;
+}
+
+// Read-only settings for drawing the current screenshot in the current language.
+// Edits must keep going through getScreenshotSettings().
+function getRenderScreenshotSettings() {
+    const screenshot = getCurrentScreenshot();
+    return screenshot ? resolveScreenshotSettings(screenshot, state.currentLanguage) : state.defaults.screenshot;
+}
+
+// Show the Screenshot tab notice when the current language is displayed mirrored
+function updateLayoutMirrorNotice() {
+    const notice = document.getElementById('layout-mirror-notice');
+    if (!notice) return;
+    const mirrored = isMirroredLanguage();
+    notice.style.display = mirrored ? 'flex' : 'none';
+    if (mirrored) {
+        const name = languageNames[state.currentLanguage] || state.currentLanguage;
+        document.getElementById('layout-mirror-notice-title').textContent = `Mirrored for ${name}`;
+    }
 }
 
 function getElementText(el) {
@@ -623,7 +701,7 @@ const languageFlags = {
     'ja': '🇯🇵', 'ko': '🇰🇷', 'zh': '🇨🇳', 'zh-tw': '🇹🇼', 'ar': '🇸🇦',
     'hi': '🇮🇳', 'tr': '🇹🇷', 'pl': '🇵🇱', 'sv': '🇸🇪', 'da': '🇩🇰',
     'no': '🇳🇴', 'fi': '🇫🇮', 'th': '🇹🇭', 'vi': '🇻🇳', 'id': '🇮🇩',
-    'uk': '🇺🇦'
+    'uk': '🇺🇦', 'he': '🇮🇱'
 };
 
 // Google Fonts configuration
@@ -1588,6 +1666,7 @@ function saveState() {
         customHeight: state.customHeight,
         currentLanguage: state.currentLanguage,
         projectLanguages: state.projectLanguages,
+        mirrorRTL: state.mirrorRTL,
         defaults: state.defaults
     };
 
@@ -1854,6 +1933,7 @@ function loadState() {
                     // Load global language settings
                     state.currentLanguage = parsed.currentLanguage || 'en';
                     state.projectLanguages = parsed.projectLanguages || ['en'];
+                    state.mirrorRTL = parsed.mirrorRTL !== false;
 
                     // Load defaults (new format) or use migrated settings
                     if (parsed.defaults) {
@@ -1914,6 +1994,7 @@ function resetStateToDefaults() {
     state.customHeight = 2868;
     state.currentLanguage = 'en';
     state.projectLanguages = ['en'];
+    state.mirrorRTL = true;
     state.defaults = {
         background: {
             type: 'gradient',
@@ -2823,8 +2904,11 @@ function setupElementCanvasDrag() {
         const scaleY = previewCanvas.height / rect.height;
         const clientX = e.touches ? e.touches[0].clientX : e.clientX;
         const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+        const x = (clientX - rect.left) * scaleX;
         return {
-            x: (clientX - rect.left) * scaleX,
+            // In a mirrored (RTL) view, flip x so hit tests and drags operate on the
+            // stored left-to-right positions and still follow the pointer on screen
+            x: isMirroredLanguage() ? previewCanvas.width - x : x,
             y: (clientY - rect.top) * scaleY
         };
     }
@@ -3333,8 +3417,9 @@ function updateCropPreview() {
     // Draw full image
     ctx2.drawImage(img, drawX, drawY, drawW, drawH);
 
-    // Dim overlay outside crop region
-    const rx = drawX + (p.cropX / 100) * drawW;
+    // Dim overlay outside crop region (showing the crop as it renders in this language)
+    const cropX = isMirroredLanguage() ? mirrorPopout(p).cropX : p.cropX;
+    const rx = drawX + (cropX / 100) * drawW;
     const ry = drawY + (p.cropY / 100) * drawH;
     const rw = (p.cropWidth / 100) * drawW;
     const rh = (p.cropHeight / 100) * drawH;
@@ -3394,8 +3479,17 @@ function setupCropPreviewDrag() {
         const scaleY = previewCanvas.height / rect.height;
         const clientX = e.touches ? e.touches[0].clientX : e.clientX;
         const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+        let x = (clientX - rect.left) * scaleX;
+        // The preview shows the mirrored crop in RTL views; flip input around the image
+        // center so hit tests and drags work on the stored crop
+        const screenshot = getCurrentScreenshot();
+        const img = screenshot && getScreenshotImage(screenshot);
+        if (img && isMirroredLanguage()) {
+            const { drawX, drawW } = getCropPreviewLayout(previewCanvas, img);
+            x = 2 * drawX + drawW - x;
+        }
         return {
-            x: (clientX - rect.left) * scaleX,
+            x,
             y: (clientY - rect.top) * scaleY
         };
     }
@@ -4573,6 +4667,13 @@ function setupEventListeners() {
         updateCanvas();
     });
 
+    // Mirror layout for right-to-left languages (project setting)
+    document.getElementById('mirror-rtl-toggle').addEventListener('click', function () {
+        state.mirrorRTL = this.classList.toggle('active');
+        updateCanvas();
+        updateLayoutMirrorNotice();
+    });
+
     // Per-language layout toggle
     document.getElementById('per-language-layout-toggle').addEventListener('click', function () {
         this.classList.toggle('active');
@@ -4885,6 +4986,7 @@ function switchGlobalLanguage(lang) {
 function openLanguagesModal() {
     document.getElementById('language-menu').classList.remove('visible');
     document.getElementById('languages-modal').classList.add('visible');
+    document.getElementById('mirror-rtl-toggle').classList.toggle('active', state.mirrorRTL !== false);
     updateLanguagesList();
     updateAddLanguageSelect();
 }
@@ -5134,7 +5236,7 @@ const languageNames = {
     'zh': 'Chinese (Simplified)', 'zh-tw': 'Chinese (Traditional)', 'ar': 'Arabic',
     'hi': 'Hindi', 'tr': 'Turkish', 'pl': 'Polish', 'sv': 'Swedish',
     'da': 'Danish', 'no': 'Norwegian', 'fi': 'Finnish', 'th': 'Thai',
-    'vi': 'Vietnamese', 'id': 'Indonesian', 'uk': 'Ukrainian'
+    'vi': 'Vietnamese', 'id': 'Indonesian', 'uk': 'Ukrainian', 'he': 'Hebrew'
 };
 
 function openTranslateModal(target) {
@@ -5184,7 +5286,7 @@ function openTranslateModal(target) {
                 <span class="flag">${languageFlags[lang]}</span>
                 <span>${escapeHtml(languageNames[lang] || lang)}</span>
             </div>
-            <textarea placeholder="Enter ${escapeHtml(languageNames[lang] || lang)} translation...">${escapeHtml(texts[lang] || '')}</textarea>
+            <textarea dir="auto" placeholder="Enter ${escapeHtml(languageNames[lang] || lang)} translation...">${escapeHtml(texts[lang] || '')}</textarea>
         `;
         targetsContainer.appendChild(item);
     });
@@ -6886,6 +6988,7 @@ function updateCanvas() {
 
     // Update side previews
     updateSidePreviews();
+    updateLayoutMirrorNotice();
 }
 
 function updateSidePreviews() {
@@ -7100,13 +7203,14 @@ function renderScreenshotToCanvas(index, targetCanvas, targetCtx, dims, previewS
         drawNoiseToContext(targetCtx, dims, bg.noiseIntensity);
     }
 
-    const elements = screenshot.elements || [];
+    const lang = state.currentLanguage;
+    const elements = resolveElements(screenshot.elements || [], lang);
 
     // Elements behind screenshot
     drawElementsToContext(targetCtx, dims, elements, 'behind-screenshot');
 
     // Draw screenshot - 3D if active for this screenshot, otherwise 2D
-    const settings = screenshot.screenshot;
+    const settings = resolveScreenshotSettings(screenshot, lang);
     const use3D = settings.use3D || false;
 
     if (img) {
@@ -7123,7 +7227,7 @@ function renderScreenshotToCanvas(index, targetCanvas, targetCtx, dims, previewS
     drawElementsToContext(targetCtx, dims, elements, 'above-screenshot');
 
     // Draw popouts
-    const popouts = screenshot.popouts || [];
+    const popouts = resolvePopouts(screenshot.popouts || [], lang);
     drawPopoutsToContext(targetCtx, dims, popouts, img, settings);
 
     // Draw text
@@ -7369,6 +7473,8 @@ function drawTextToContext(context, dims, txt) {
     if (headline) {
         const fontStyle = txt.headlineItalic ? 'italic' : 'normal';
         context.font = `${fontStyle} ${txt.headlineWeight} ${headlineLayout.headlineSize}px ${txt.headlineFont}`;
+        // Right-to-left base direction keeps punctuation and mixed Latin/numbers in the right order
+        context.direction = isRTL(headlineLang) ? 'rtl' : 'ltr';
         context.fillStyle = txt.headlineColor;
 
         const lines = wrapText(context, headline, dims.width - padding * 2);
@@ -7426,6 +7532,7 @@ function drawTextToContext(context, dims, txt) {
         const subFontStyle = txt.subheadlineItalic ? 'italic' : 'normal';
         const subWeight = txt.subheadlineWeight || '400';
         context.font = `${subFontStyle} ${subWeight} ${subheadlineLayout.subheadlineSize}px ${txt.subheadlineFont || txt.headlineFont}`;
+        context.direction = isRTL(subheadlineLang) ? 'rtl' : 'ltr';
         context.fillStyle = hexToRgba(txt.subheadlineColor, txt.subheadlineOpacity / 100);
 
         const lines = wrapText(context, subheadline, dims.width - padding * 2);
@@ -7466,11 +7573,13 @@ function drawTextToContext(context, dims, txt) {
             context.textBaseline = 'bottom';
         }
     }
+
+    context.direction = 'ltr';
 }
 
 // Draw elements for the current screenshot at a specific layer
 function drawElements(context, dims, layer) {
-    const elements = getElements();
+    const elements = resolveElements(getElements(), state.currentLanguage);
     drawElementsToContext(context, dims, elements, layer);
 }
 
@@ -7527,6 +7636,7 @@ function drawElementsToContext(context, dims, elements, layer) {
             if (!elText) { context.restore(); return; }
             const fontStyle = el.italic ? 'italic' : 'normal';
             context.font = `${fontStyle} ${el.fontWeight} ${el.fontSize}px ${el.font}`;
+            context.direction = isRTL(state.currentLanguage) ? 'rtl' : 'ltr';
             context.fillStyle = el.fontColor;
             context.textAlign = 'center';
             context.textBaseline = 'middle';
@@ -7558,9 +7668,8 @@ function drawPopouts(context, dims) {
     if (!screenshot) return;
     const img = getScreenshotImage(screenshot);
     if (!img) return;
-    const popouts = screenshot.popouts || [];
-    const ss = getScreenshotSettings();
-    drawPopoutsToContext(context, dims, popouts, img, ss);
+    const popouts = resolvePopouts(screenshot.popouts || [], state.currentLanguage);
+    drawPopoutsToContext(context, dims, popouts, img, getRenderScreenshotSettings());
 }
 
 function drawPopoutsToContext(context, dims, popouts, img, screenshotSettings) {
@@ -7756,11 +7865,11 @@ function drawScreenshot() {
     if (!screenshot) return;
     // Use localized image based on current language
     const img = getScreenshotImage(screenshot);
-    drawScreenshotToContext(ctx, getCanvasDimensions(), img, getScreenshotSettings());
+    drawScreenshotToContext(ctx, getCanvasDimensions(), img, getRenderScreenshotSettings());
 }
 
 function drawDeviceFrame(x, y, width, height) {
-    drawDeviceFrameToContext(ctx, x, y, width, height, getScreenshotSettings());
+    drawDeviceFrameToContext(ctx, x, y, width, height, getRenderScreenshotSettings());
 }
 
 function drawText() {

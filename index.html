@@ -538,6 +538,13 @@
 
             <!-- Screenshot Tab -->
             <div class="tab-content" id="tab-screenshot">
+                <div id="layout-mirror-notice" class="tip-box layout-mirror-notice" style="display: none;">
+                    <img src="img/info.svg" width="16" height="16" alt="Info">
+                    <div class="tip-content">
+                        <strong id="layout-mirror-notice-title">Mirrored layout</strong>
+                        <span>Position and rotation edit the shared layout, which is shown flipped here.</span>
+                    </div>
+                </div>
                 <div class="control-group">
                     <label class="control-label">Device Type</label>
                     <div class="btn-group" id="device-type-selector">
@@ -809,7 +816,7 @@
                 <div id="headline-options">
                 <div class="control-group">
                     <div class="textarea-with-button">
-                        <textarea id="headline-text" rows="2" placeholder="Your feature headline"></textarea>
+                        <textarea dir="auto" id="headline-text" rows="2" placeholder="Your feature headline"></textarea>
                         <button class="magic-translate-btn" id="translate-headline-btn" title="Translate to all languages">
                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                 <path d="M5 8l6 6M4 14l6-6 2-3M2 5h12M7 2v3M22 22l-5-10-5 10M14 18h6"/>
@@ -930,7 +937,7 @@
                 <div id="subheadline-options" style="display: none;">
                 <div class="control-group">
                     <div class="textarea-with-button">
-                        <textarea id="subheadline-text" rows="2" placeholder="Optional subheadline"></textarea>
+                        <textarea dir="auto" id="subheadline-text" rows="2" placeholder="Optional subheadline"></textarea>
                         <button class="magic-translate-btn" id="translate-subheadline-btn" title="Translate to all languages">
                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                 <path d="M5 8l6 6M4 14l6-6 2-3M2 5h12M7 2v3M22 22l-5-10-5 10M14 18h6"/>
@@ -1216,7 +1223,7 @@
                         <div class="control-group">
                             <label class="control-label">Text</label>
                             <div class="textarea-with-button">
-                                <textarea id="element-text-input" rows="2" placeholder="Enter text"></textarea>
+                                <textarea dir="auto" id="element-text-input" rows="2" placeholder="Enter text"></textarea>
                                 <button class="magic-translate-btn" id="translate-element-btn" title="Translate to all languages">
                                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                         <path d="M5 8l6 6M4 14l6-6 2-3M2 5h12M7 2v3M22 22l-5-10-5 10M14 18h6"/>
@@ -1817,6 +1824,14 @@
                 <select id="add-language-select" class="control-select">
                     <option value="">Add a language...</option>
                 </select>
+            </div>
+
+            <div class="control-group mirror-rtl-setting">
+                <div class="toggle-row">
+                    <span class="toggle-label">Mirror layout for right-to-left languages</span>
+                    <div class="toggle" id="mirror-rtl-toggle"></div>
+                </div>
+                <p class="hint-text">Hebrew and Arabic flip the device, elements and popouts horizontally.</p>
             </div>
 
             <div class="modal-buttons">
