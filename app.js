@@ -1496,8 +1496,35 @@ function initSync() {
     init();
 }
 
-// Save state to IndexedDB for current project
+// Debounced persistence: updateCanvas() runs on every slider tick, and each save
+// serializes every screenshot image, so coalesce rapid edits into one write.
+const SAVE_DEBOUNCE_MS = 400;
+let pendingSaveTimer = null;
+
+function scheduleSave() {
+    clearTimeout(pendingSaveTimer);
+    pendingSaveTimer = setTimeout(saveState, SAVE_DEBOUNCE_MS);
+}
+
+function cancelPendingSave() {
+    clearTimeout(pendingSaveTimer);
+    pendingSaveTimer = null;
+}
+
+// Write any pending edits before the page is hidden or closed
+function flushPendingSave() {
+    if (pendingSaveTimer !== null) saveState();
+}
+document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') flushPendingSave();
+});
+window.addEventListener('pagehide', flushPendingSave);
+
+// Save state to IndexedDB for current project.
+// Calling this directly also flushes any pending debounced save, so callers that
+// are about to swap out `state` (e.g. switchProject) never get a stale write later.
 function saveState() {
+    cancelPendingSave();
     if (!db) return;
 
     // Convert screenshots to base64 for storage, including per-screenshot settings and localized images
@@ -2009,6 +2036,7 @@ async function deleteProject() {
 
 async function duplicateProject(sourceProjectId, customName) {
     if (!db) return;
+    flushPendingSave();
 
     const transaction = db.transaction([PROJECTS_STORE], 'readonly');
     const store = transaction.objectStore(PROJECTS_STORE);
@@ -3797,6 +3825,7 @@ function setupEventListeners() {
     // Export project backup
     document.getElementById('export-project-btn').addEventListener('click', async () => {
         if (!db) return;
+        flushPendingSave();
         try {
             const dump = {};
             for (const name of db.objectStoreNames) {
@@ -3865,6 +3894,8 @@ function setupEventListeners() {
             const text = await file.text();
             const dump = JSON.parse(text);
             validateBackup(dump);
+            // Don't let a pending save of the in-memory project overwrite the imported data
+            cancelPendingSave();
             for (const storeName of Object.keys(dump)) {
                 if (!db.objectStoreNames.contains(storeName)) continue;
                 const tx = db.transaction(storeName, 'readwrite');
@@ -6842,7 +6873,7 @@ function getCanvasDimensions() {
 }
 
 function updateCanvas() {
-    saveState(); // Persist state on every update
+    scheduleSave(); // Persist state (debounced) on every update
     const dims = getCanvasDimensions();
     canvas.width = dims.width;
     canvas.height = dims.height;
