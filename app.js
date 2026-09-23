@@ -436,6 +436,7 @@ async function updateIconImage(el) {
     try {
         el.image = await getLucideImage(el.iconName, el.iconColor, el.iconStrokeWidth);
         updateCanvas();
+        updateElementsList(); // refresh the thumbnail with the new color/stroke
     } catch (e) {
         console.error('Failed to update icon image:', e);
     }
@@ -511,6 +512,7 @@ async function addIconElement(iconName) {
     try {
         el.image = await getLucideImage(iconName, el.iconColor, el.iconStrokeWidth);
         updateCanvas();
+        updateElementsList(); // the list was built before the icon image existed
     } catch (e) {
         console.error('Failed to load icon:', e);
     }
@@ -1669,6 +1671,7 @@ function reconstructElementImages(elements) {
                 .then(img => {
                     restored.image = img;
                     updateCanvas();
+                    updateElementsList();
                 })
                 .catch(e => console.error('Failed to reconstruct icon:', e));
         }
