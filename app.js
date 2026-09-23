@@ -385,11 +385,15 @@ function addTextElement() {
 }
 
 // ===== Lucide SVG loading & caching =====
+// Pinned: `@latest` moved to Lucide 1.x, which dropped the brand icons in LUCIDE_ALL.
+// 0.577.0 is the last release that has every icon in the list.
+const LUCIDE_VERSION = '0.577.0';
 const lucideSVGCache = new Map(); // name -> raw SVG text
+const lucideImageCache = new Map(); // "name|color|strokeWidth" -> Promise<Image>
 
 async function fetchLucideSVG(name) {
     if (lucideSVGCache.has(name)) return lucideSVGCache.get(name);
-    const url = `https://unpkg.com/lucide-static@latest/icons/${name}.svg`;
+    const url = `https://unpkg.com/lucide-static@${LUCIDE_VERSION}/icons/${encodeURIComponent(name)}.svg`;
     const resp = await fetch(url);
     if (!resp.ok) throw new Error(`Failed to fetch icon: ${name}`);
     const svgText = await resp.text();
@@ -403,17 +407,28 @@ function colorizeLucideSVG(svgText, color, strokeWidth) {
         .replace(/stroke-width="[^"]*"/g, `stroke-width="${strokeWidth}"`);
 }
 
-async function getLucideImage(name, color, strokeWidth) {
-    const rawSVG = await fetchLucideSVG(name);
-    const colorized = colorizeLucideSVG(rawSVG, color, strokeWidth);
-    const blob = new Blob([colorized], { type: 'image/svg+xml' });
-    const blobURL = URL.createObjectURL(blob);
-    return new Promise((resolve, reject) => {
-        const img = new Image();
-        img.onload = () => resolve(img);
-        img.onerror = reject;
-        img.src = blobURL;
-    });
+// Cached per icon/color/stroke so repeated renders reuse one blob URL instead of
+// leaking a new one each time. (Images are shared between elements by "apply style
+// to all", so revoking a URL when one element changes would break the others.)
+function getLucideImage(name, color, strokeWidth) {
+    const key = `${name}|${color}|${strokeWidth}`;
+    if (!lucideImageCache.has(key)) {
+        const promise = fetchLucideSVG(name).then(rawSVG => new Promise((resolve, reject) => {
+            const colorized = colorizeLucideSVG(rawSVG, color, strokeWidth);
+            const blobURL = URL.createObjectURL(new Blob([colorized], { type: 'image/svg+xml' }));
+            const img = new Image();
+            img.onload = () => resolve(img);
+            img.onerror = (e) => {
+                URL.revokeObjectURL(blobURL);
+                reject(e);
+            };
+            img.src = blobURL;
+        }));
+        // Don't cache failures, so a later attempt can retry
+        promise.catch(() => lucideImageCache.delete(key));
+        lucideImageCache.set(key, promise);
+    }
+    return lucideImageCache.get(key);
 }
 
 async function updateIconImage(el) {
@@ -8242,13 +8257,15 @@ const iconImageObserver = typeof IntersectionObserver !== 'undefined' ? new Inte
 async function loadIconPreview(item, name) {
     try {
         const svgText = await fetchLucideSVG(name);
-        const colorized = colorizeLucideSVG(svgText, 'currentColor', 2);
-        item.innerHTML = colorized;
-        const svg = item.querySelector('svg');
-        if (svg) {
-            svg.style.width = '20px';
-            svg.style.height = '20px';
-        }
+        // Render as an <img> rather than injecting the fetched markup into the DOM,
+        // so remote SVG content can never run script. Bake in the current text color
+        // since `currentColor` doesn't inherit into an image.
+        const color = getComputedStyle(item).color;
+        const colorized = colorizeLucideSVG(svgText, color, 2);
+        const img = document.createElement('img');
+        img.alt = name;
+        img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(colorized);
+        item.replaceChildren(img);
     } catch (e) {
         item.innerHTML = `<span style="font-size: 9px; color: var(--text-tertiary);">${escapeHtml(name)}</span>`;
     }
