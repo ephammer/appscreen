@@ -1972,8 +1972,12 @@ function resetStateToDefaults() {
 
 // Switch to a different project
 async function switchProject(projectId) {
-    // Save current project first
-    saveState();
+    // Save current project first, unless it was just deleted (saving would write it back)
+    if (projects.some(p => p.id === currentProjectId)) {
+        saveState();
+    } else {
+        cancelPendingSave();
+    }
 
     currentProjectId = projectId;
     saveProjectsMeta();
