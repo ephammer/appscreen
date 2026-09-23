@@ -53,6 +53,12 @@ const state = {
                 color: '#1d1d1f',
                 width: 12,
                 opacity: 100
+            },
+            // Apple product bezel around the screenshot (images live in frames/)
+            bezel: {
+                enabled: false,
+                model: 'auto',
+                color: null
             }
         },
         text: {
@@ -2162,6 +2168,12 @@ function resetStateToDefaults() {
                 color: '#1d1d1f',
                 width: 12,
                 opacity: 100
+            },
+            // Apple product bezel around the screenshot (images live in frames/)
+            bezel: {
+                enabled: false,
+                model: 'auto',
+                color: null
             }
         },
         text: {
@@ -2408,6 +2420,7 @@ function updateFrameColorSwatches(deviceType, activeColorId) {
 // Sync UI controls with current state
 function syncUIWithState() {
     updateLanguageFontControl();
+    updateBezelControls();
     // Update language button
     updateLanguageButton();
 
@@ -4784,6 +4797,18 @@ function setupEventListeners() {
     });
 
     // Frame toggle
+    document.getElementById('bezel-toggle').addEventListener('click', function () {
+        ensureBezelSettings(getScreenshotSettings()).enabled = this.classList.toggle('active');
+        updateBezelControls();
+        updateCanvas();
+    });
+
+    document.getElementById('bezel-model').addEventListener('change', (e) => {
+        ensureBezelSettings(getScreenshotSettings()).model = e.target.value;
+        updateBezelControls();
+        updateCanvas();
+    });
+
     document.getElementById('frame-toggle').addEventListener('click', function () {
         this.classList.toggle('active');
         const frameEnabled = this.classList.contains('active');
@@ -7509,16 +7534,109 @@ function drawNoiseToContext(context, dims, intensity) {
     context.putImageData(imageData, 0, 0);
 }
 
+// ===== Device bezels =====
+// Apple product bezels, stored locally in frames/<model>/<color>-<orientation>.png
+// (not committed: see frames/README.md). The screenshot is drawn under the bezel,
+// clipped to the bezel's transparent screen area, so the Dynamic Island stays on top.
+const deviceBezels = {
+    'iphone-18-pro': { name: 'iPhone 18 Pro', deviceType: 'iPhone', colors: ['black', 'burgundy', 'glacier', 'silver'] },
+    'ipad-pro-13': { name: 'iPad Pro 13"', deviceType: 'iPad', colors: ['silver', 'space-black'] }
+};
+
+const bezelCache = new Map(); // url -> { status: 'loading' | 'ready' | 'missing', img, screen }
+
+// Same heuristic as uploads: wider than 0.6 (portrait) is an iPad
+function isIPadImage(img) {
+    const ratio = Math.min(img.width, img.height) / Math.max(img.width, img.height);
+    return ratio > 0.6;
+}
+
+function resolveBezelModel(bezel, img) {
+    if (bezel.model && bezel.model !== 'auto' && deviceBezels[bezel.model]) return bezel.model;
+    const deviceType = isIPadImage(img) ? 'iPad' : 'iPhone';
+    return Object.keys(deviceBezels).find(key => deviceBezels[key].deviceType === deviceType);
+}
+
+function getBezelUrl(settings, img) {
+    const bezel = settings.bezel;
+    if (!bezel?.enabled || !img) return null;
+    const model = resolveBezelModel(bezel, img);
+    if (!model) return null;
+    const colors = deviceBezels[model].colors;
+    const color = colors.includes(bezel.color) ? bezel.color : colors[0];
+    const orientation = img.width > img.height ? 'landscape' : 'portrait';
+    return `frames/${model}/${color}-${orientation}.png`;
+}
+
+// Find the transparent screen area and its corner radius in a bezel image
+function measureBezelScreen(img) {
+    const c = document.createElement('canvas');
+    c.width = img.width;
+    c.height = img.height;
+    const g = c.getContext('2d', { willReadFrequently: true });
+    g.drawImage(img, 0, 0);
+    const data = g.getImageData(0, 0, c.width, c.height).data;
+    const alpha = (x, y) => data[(y * c.width + x) * 4 + 3];
+
+    const cx = c.width >> 1;
+    const cy = c.height >> 1;
+    let left = cx, right = cx;
+    while (left > 0 && alpha(left - 1, cy) === 0) left--;
+    while (right < c.width - 1 && alpha(right + 1, cy) === 0) right++;
+    // Measure height a quarter in from the left, clear of the Dynamic Island / camera
+    const sx = left + ((right - left) >> 2);
+    let top = cy, bottom = cy;
+    while (top > 0 && alpha(sx, top - 1) === 0) top--;
+    while (bottom < c.height - 1 && alpha(sx, bottom + 1) === 0) bottom++;
+
+    // Walk the diagonal from the screen rect's corner: possibly outside the body
+    // (transparent), then the bezel (opaque), then the screen again (transparent)
+    let d = 0;
+    while (d < 400 && alpha(left + d, top + d) === 0) d++;
+    while (d < 400 && alpha(left + d, top + d) !== 0) d++;
+    // A circle of radius r reaches the diagonal at r * (1 - 1/sqrt 2) from the corner
+    const radius = d / (1 - Math.SQRT1_2);
+
+    return { x: left, y: top, width: right - left + 1, height: bottom - top + 1, radius };
+}
+
+// Returns the loaded bezel ({ img, screen }) or null; starts loading on first use
+function getBezel(url) {
+    if (!url) return null;
+    let entry = bezelCache.get(url);
+    if (!entry) {
+        entry = { status: 'loading' };
+        bezelCache.set(url, entry);
+        const img = new Image();
+        img.onload = () => {
+            entry.img = img;
+            entry.screen = measureBezelScreen(img);
+            entry.status = 'ready';
+            updateCanvas();
+        };
+        img.onerror = () => {
+            entry.status = 'missing';
+            if (typeof updateBezelControls === 'function') updateBezelControls();
+        };
+        img.src = url;
+    }
+    return entry.status === 'ready' ? entry : null;
+}
+
 function drawScreenshotToContext(context, dims, img, settings) {
     if (!img) return;
 
+    // With a device bezel, the device (not the bare screenshot) is what gets sized and placed
+    const bezel = getBezel(getBezelUrl(settings, img));
+    const content = bezel ? bezel.img : img;
+
     const scale = settings.scale / 100;
     let imgWidth = dims.width * scale;
-    let imgHeight = (img.height / img.width) * imgWidth;
+    let imgHeight = (content.height / content.width) * imgWidth;
 
     if (imgHeight > dims.height * scale) {
         imgHeight = dims.height * scale;
-        imgWidth = (img.width / img.height) * imgHeight;
+        imgWidth = (content.width / content.height) * imgHeight;
     }
 
     // Ensure minimum movement range so position works even at 100% scale
@@ -7545,6 +7663,12 @@ function drawScreenshotToContext(context, dims, img, settings) {
     }
 
     context.translate(-centerX, -centerY);
+
+    if (bezel) {
+        drawBezelDevice(context, img, bezel, x, y, imgWidth, imgHeight, settings);
+        context.restore();
+        return;
+    }
 
     // Scale corner radius with image size
     const radius = (settings.cornerRadius || 0) * (imgWidth / 400);
@@ -7593,6 +7717,80 @@ function drawScreenshotToContext(context, dims, img, settings) {
         drawDeviceFrameToContext(context, x, y, imgWidth, imgHeight, settings);
         context.restore();
     }
+}
+
+function ensureBezelSettings(ss) {
+    if (!ss.bezel) ss.bezel = { enabled: false, model: 'auto', color: null };
+    return ss.bezel;
+}
+
+// Device tab "Device Frame" controls for the current screenshot
+function updateBezelControls() {
+    const toggle = document.getElementById('bezel-toggle');
+    if (!toggle) return;
+    const ss = getScreenshotSettings();
+    const bezel = ss.bezel || { enabled: false, model: 'auto', color: null };
+    toggle.classList.toggle('active', !!bezel.enabled);
+    document.getElementById('bezel-options').style.display = bezel.enabled ? 'block' : 'none';
+    document.getElementById('bezel-model').value = deviceBezels[bezel.model] ? bezel.model : 'auto';
+
+    const screenshot = getCurrentScreenshot();
+    const img = screenshot ? getScreenshotImage(screenshot) : null;
+    const model = img ? resolveBezelModel(bezel, img) : (deviceBezels[bezel.model] ? bezel.model : null);
+    const colors = model ? deviceBezels[model].colors : [];
+    const selected = colors.includes(bezel.color) ? bezel.color : colors[0];
+    document.getElementById('bezel-colors').replaceChildren(...colors.map(color => {
+        const btn = document.createElement('button');
+        btn.className = 'language-chip' + (color === selected ? ' active' : '');
+        btn.textContent = color.replace(/-/g, ' ');
+        btn.addEventListener('click', () => {
+            ensureBezelSettings(getScreenshotSettings()).color = color;
+            updateBezelControls();
+            updateCanvas();
+        });
+        return btn;
+    }));
+
+    const url = bezel.enabled && img ? getBezelUrl(ss, img) : null;
+    document.getElementById('bezel-missing').style.display =
+        url && bezelCache.get(url)?.status === 'missing' ? '' : 'none';
+}
+
+// Draw a screenshot inside a bezel: shadow from the device outline, the screenshot
+// clipped to the screen, then the bezel on top (keeping the Dynamic Island visible)
+function drawBezelDevice(context, img, bezel, x, y, width, height, settings) {
+    const s = width / bezel.img.width;
+    const screen = bezel.screen;
+
+    if (settings.shadow && settings.shadow.enabled) {
+        context.save();
+        const shadowOpacity = settings.shadow.opacity / 100;
+        context.shadowColor = settings.shadow.color + Math.round(shadowOpacity * 255).toString(16).padStart(2, '0');
+        context.shadowBlur = settings.shadow.blur;
+        context.shadowOffsetX = settings.shadow.x;
+        context.shadowOffsetY = settings.shadow.y;
+        context.drawImage(bezel.img, x, y, width, height);
+        context.restore();
+    }
+
+    // Screen area, grown by a pixel so the bezel's anti-aliased inner edge has no gap
+    const sx = x + screen.x * s - 1;
+    const sy = y + screen.y * s - 1;
+    const sw = screen.width * s + 2;
+    const sh = screen.height * s + 2;
+
+    context.save();
+    context.beginPath();
+    roundRect(context, sx, sy, sw, sh, screen.radius * s);
+    context.clip();
+    // Cover-fit the screenshot into the screen (the aspect ratios match closely)
+    const fit = Math.max(sw / img.width, sh / img.height);
+    const dw = img.width * fit;
+    const dh = img.height * fit;
+    context.drawImage(img, sx + (sw - dw) / 2, sy + (sh - dh) / 2, dw, dh);
+    context.restore();
+
+    context.drawImage(bezel.img, x, y, width, height);
 }
 
 function drawDeviceFrameToContext(context, x, y, width, height, settings) {

@@ -789,6 +789,31 @@
                         </div>
                     </div>
                 </div>
+
+                <div class="divider"></div>
+
+                <div class="control-group">
+                    <div class="toggle-row">
+                        <span class="toggle-label">Device Frame</span>
+                        <div class="toggle" id="bezel-toggle"></div>
+                    </div>
+                </div>
+
+                <div id="bezel-options" style="display: none;">
+                    <div class="control-group">
+                        <label class="control-label">Device</label>
+                        <select id="bezel-model">
+                            <option value="auto">Automatic (iPhone or iPad)</option>
+                            <option value="iphone-18-pro">iPhone 18 Pro</option>
+                            <option value="ipad-pro-13">iPad Pro 13"</option>
+                        </select>
+                    </div>
+                    <div class="control-group">
+                        <label class="control-label">Color</label>
+                        <div class="bezel-colors" id="bezel-colors"></div>
+                    </div>
+                    <p class="hint-text" id="bezel-missing" style="display: none;">Bezel images not found. Add them to frames/ as described in frames/README.md.</p>
+                </div>
                 </div><!-- end 2d-only-settings -->
 
                 <div id="3d-tip" class="tip-box" style="display: none;">

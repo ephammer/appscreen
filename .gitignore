@@ -22,3 +22,8 @@ frontend-dist/
 *.AppImage
 *.deb
 *.snap
+
+# Apple product bezels: licensed for your own marketing use, not for
+# redistribution, so they stay local. See frames/README.md.
+frames/*
+!frames/README.md

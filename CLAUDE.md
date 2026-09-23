@@ -98,6 +98,11 @@ Elements and popouts are drawn in between, by layer. Each `drawX()` is a thin wr
 - `screenshot.languageLayouts[lang]` is an optional full copy of the device settings for one language. `getScreenshotSettings()` and `setScreenshotSetting()` edit it when present, so all device controls work unchanged
 - `el.hiddenLanguages` hides an element per language; `state.languageFonts[lang]` overrides headline/subheadline/text element fonts per language (project-wide)
 
+**Device frames (in app.js):**
+- Apple product bezels live in `frames/<model>/<color>-<orientation>.png`. They are git-ignored (Apple's license doesn't allow redistribution); `frames/README.md` says how to add them. The app works without them
+- `deviceBezels` is the catalog; `settings.bezel = { enabled, model: 'auto' | <model>, color }` is part of the device settings, so it works with per-language layouts and mirroring
+- `getBezel()` loads a bezel once and `measureBezelScreen()` finds its transparent screen rect and corner radius. `drawBezelDevice()` draws the bezel-shaped shadow, then the screenshot clipped to the screen, then the bezel on top (so the Dynamic Island stays visible)
+
 **fastlane export:** `exportForFastlane()` writes `screenshots/<App Store locale>/<NN>_<device>.png` using `fastlaneLocales`. `renderScreenshotsForLanguages()` is the shared render loop for all ZIP exports.
 
 **UI Components:**

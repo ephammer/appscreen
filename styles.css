@@ -2346,6 +2346,19 @@ input[type="range"]::-webkit-slider-thumb {
     opacity: 0.5;
 }
 
+.bezel-colors {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.bezel-colors .language-chip {
+    text-transform: capitalize;
+    /* Unselected colors are available choices, not hidden ones */
+    text-decoration: none;
+    opacity: 1;
+}
+
 .mirror-rtl-setting {
     margin-top: 16px;
 }
