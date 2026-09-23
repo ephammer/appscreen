@@ -1424,8 +1424,9 @@ function saveProjectsMeta() {
         const store = transaction.objectStore(META_STORE);
         store.put({ key: 'projects', value: projects });
         store.put({ key: 'currentProject', value: currentProjectId });
+        transaction.onabort = () => handleSaveError(transaction.error);
     } catch (e) {
-        console.error('Error saving projects meta:', e);
+        handleSaveError(e);
     }
 }
 
@@ -1584,9 +1585,39 @@ function saveState() {
         const transaction = db.transaction([PROJECTS_STORE], 'readwrite');
         const store = transaction.objectStore(PROJECTS_STORE);
         store.put(stateToSave);
+        transaction.oncomplete = () => { saveErrorShown = false; };
+        transaction.onabort = () => handleSaveError(transaction.error);
     } catch (e) {
-        console.error('Error saving state:', e);
+        handleSaveError(e);
     }
+
+    if (state.screenshots.length > 0) requestPersistentStorage();
+}
+
+// Tell the user when a save fails (e.g. storage quota exceeded) instead of silently
+// losing edits. Shown once per failure streak so every debounced save doesn't re-alert.
+let saveErrorShown = false;
+
+function handleSaveError(error) {
+    console.error('Error saving state:', error);
+    if (saveErrorShown) return;
+    saveErrorShown = true;
+    const message = error?.name === 'QuotaExceededError'
+        ? 'Browser storage is full, so your latest changes could not be saved. Export a backup, then delete unused projects or screenshots to free up space.'
+        : `Your latest changes could not be saved: ${error?.message || 'unknown error'}`;
+    showAppAlert(message, 'error');
+}
+
+// Ask the browser to exempt our IndexedDB data from eviction under storage pressure.
+// Requested once there is real content, since some browsers show a permission prompt.
+let persistentStorageRequested = false;
+
+function requestPersistentStorage() {
+    if (persistentStorageRequested || !navigator.storage?.persist) return;
+    persistentStorageRequested = true;
+    navigator.storage.persisted()
+        .then(persisted => persisted || navigator.storage.persist())
+        .catch(() => {});
 }
 
 // Migrate 3D positions from old formula to new formula
