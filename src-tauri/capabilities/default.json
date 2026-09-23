@@ -10,7 +10,16 @@
     {
       "identifier": "fs:allow-read-file",
       "allow": [
-        { "path": "**/*" }
+        { "path": "**/*.png" },
+        { "path": "**/*.PNG" },
+        { "path": "**/*.jpg" },
+        { "path": "**/*.JPG" },
+        { "path": "**/*.jpeg" },
+        { "path": "**/*.JPEG" },
+        { "path": "**/*.gif" },
+        { "path": "**/*.GIF" },
+        { "path": "**/*.webp" },
+        { "path": "**/*.WEBP" }
       ]
     }
   ]
