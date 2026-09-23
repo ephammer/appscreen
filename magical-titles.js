@@ -266,7 +266,7 @@ function showMagicalTitlesDialog() {
     const langSelect = document.getElementById('magical-titles-language');
     langSelect.innerHTML = state.projectLanguages.map(lang => {
         const langName = languageNames[lang] || lang;
-        return `<option value="${lang}">${langName}</option>`;
+        return `<option value="${escapeHtml(lang)}">${escapeHtml(langName)}</option>`;
     }).join('');
 
     // Show modal

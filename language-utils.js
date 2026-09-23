@@ -275,7 +275,7 @@ function updateScreenshotTranslationsList() {
     state.projectLanguages.forEach(lang => {
         const hasImage = screenshot.localizedImages?.[lang]?.image;
         const flag = languageFlags[lang] || '🏳️';
-        const name = languageNames[lang] || lang.toUpperCase();
+        const name = escapeHtml(languageNames[lang] || lang.toUpperCase());
 
         const item = document.createElement('div');
         item.className = 'translation-item' + (hasImage ? ' has-image' : '');
@@ -473,7 +473,7 @@ function showDuplicateDialog(params) {
         const existingLangImg = screenshot.localizedImages?.[params.detectedLang]?.image;
         if (existingThumb) {
             if (existingLangImg) {
-                existingThumb.innerHTML = `<img src="${existingLangImg.src}" alt="Existing">`;
+                existingThumb.innerHTML = `<img src="${escapeHtml(existingLangImg.src)}" alt="Existing">`;
             } else {
                 // No existing image for this language - show empty placeholder
                 existingThumb.innerHTML = `
@@ -488,7 +488,7 @@ function showDuplicateDialog(params) {
 
         // Set new thumbnail
         if (newThumb && params.newImage) {
-            newThumb.innerHTML = `<img src="${params.newSrc}" alt="New">`;
+            newThumb.innerHTML = `<img src="${escapeHtml(params.newSrc)}" alt="New">`;
         }
 
         // Set filenames

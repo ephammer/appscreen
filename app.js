@@ -112,6 +112,17 @@ const laurelImages = {};
     laurelImages[name] = img;
 });
 
+// Escape a value for safe interpolation into innerHTML (text and attribute contexts).
+// Use for anything that can come from user input or imported project files.
+function escapeHtml(value) {
+    return String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
 // Helper functions to get/set current screenshot settings
 function getCurrentScreenshot() {
     if (state.screenshots.length === 0) return null;
@@ -1440,7 +1451,7 @@ function updateProjectSelector() {
         const screenshotCount = project.id === currentProjectId ? state.screenshots.length : (project.screenshotCount || 0);
 
         option.innerHTML = `
-            <span class="project-option-name">${project.name}</span>
+            <span class="project-option-name">${escapeHtml(project.name)}</span>
             <span class="project-option-meta">${screenshotCount} screenshot${screenshotCount !== 1 ? 's' : ''}</span>
         `;
 
@@ -1485,8 +1496,35 @@ function initSync() {
     init();
 }
 
-// Save state to IndexedDB for current project
+// Debounced persistence: updateCanvas() runs on every slider tick, and each save
+// serializes every screenshot image, so coalesce rapid edits into one write.
+const SAVE_DEBOUNCE_MS = 400;
+let pendingSaveTimer = null;
+
+function scheduleSave() {
+    clearTimeout(pendingSaveTimer);
+    pendingSaveTimer = setTimeout(saveState, SAVE_DEBOUNCE_MS);
+}
+
+function cancelPendingSave() {
+    clearTimeout(pendingSaveTimer);
+    pendingSaveTimer = null;
+}
+
+// Write any pending edits before the page is hidden or closed
+function flushPendingSave() {
+    if (pendingSaveTimer !== null) saveState();
+}
+document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') flushPendingSave();
+});
+window.addEventListener('pagehide', flushPendingSave);
+
+// Save state to IndexedDB for current project.
+// Calling this directly also flushes any pending debounced save, so callers that
+// are about to swap out `state` (e.g. switchProject) never get a stale write later.
 function saveState() {
+    cancelPendingSave();
     if (!db) return;
 
     // Convert screenshots to base64 for storage, including per-screenshot settings and localized images
@@ -1998,6 +2036,7 @@ async function deleteProject() {
 
 async function duplicateProject(sourceProjectId, customName) {
     if (!db) return;
+    flushPendingSave();
 
     const transaction = db.transaction([PROJECTS_STORE], 'readonly');
     const store = transaction.objectStore(PROJECTS_STORE);
@@ -2353,11 +2392,11 @@ function updateElementsList() {
 
         let thumbContent;
         if (el.type === 'graphic' && el.image) {
-            thumbContent = `<img src="${el.image.src}" alt="${el.name}">`;
+            thumbContent = `<img src="${escapeHtml(el.image.src)}" alt="${escapeHtml(el.name)}">`;
         } else if (el.type === 'emoji') {
-            thumbContent = `<span class="emoji-thumb">${el.emoji}</span>`;
+            thumbContent = `<span class="emoji-thumb">${escapeHtml(el.emoji)}</span>`;
         } else if (el.type === 'icon' && el.image) {
-            thumbContent = `<img src="${el.image.src}" alt="${el.name}" style="padding: 4px; filter: var(--icon-thumb-filter, none);">`;
+            thumbContent = `<img src="${escapeHtml(el.image.src)}" alt="${escapeHtml(el.name)}" style="padding: 4px; filter: var(--icon-thumb-filter, none);">`;
         } else {
             thumbContent = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <path d="M4 7V4h16v3"/><path d="M9 20h6"/><path d="M12 4v16"/>
@@ -2367,8 +2406,8 @@ function updateElementsList() {
         item.innerHTML = `
             <div class="element-item-thumb">${thumbContent}</div>
             <div class="element-item-info">
-                <div class="element-item-name">${el.type === 'text' ? (getElementText(el) || 'Text') : el.type === 'emoji' ? `${el.emoji} ${el.name}` : el.name}</div>
-                <div class="element-item-layer">${layerLabels[el.layer] || el.layer}</div>
+                <div class="element-item-name">${escapeHtml(el.type === 'text' ? (getElementText(el) || 'Text') : el.type === 'emoji' ? `${el.emoji} ${el.name}` : el.name)}</div>
+                <div class="element-item-layer">${escapeHtml(layerLabels[el.layer] || el.layer)}</div>
             </div>
             <div class="element-item-actions">
                 <button class="element-item-btn" data-action="move-up" title="Move up">
@@ -3786,6 +3825,7 @@ function setupEventListeners() {
     // Export project backup
     document.getElementById('export-project-btn').addEventListener('click', async () => {
         if (!db) return;
+        flushPendingSave();
         try {
             const dump = {};
             for (const name of db.objectStoreNames) {
@@ -3810,6 +3850,38 @@ function setupEventListeners() {
         }
     });
 
+    // Check that a backup file has the shape we export before writing it to IndexedDB
+    function validateBackup(dump) {
+        const isPlainObject = v => v !== null && typeof v === 'object' && !Array.isArray(v);
+        if (!isPlainObject(dump)) throw new Error('Not a valid backup file');
+        const projectRecords = dump[PROJECTS_STORE];
+        const metaRecords = dump[META_STORE];
+        if (!Array.isArray(projectRecords) || !Array.isArray(metaRecords)) {
+            throw new Error('Backup is missing project data');
+        }
+        for (const record of projectRecords) {
+            if (!isPlainObject(record) || typeof record.id !== 'string') {
+                throw new Error('Backup contains an invalid project record');
+            }
+            if (record.screenshots !== undefined && !Array.isArray(record.screenshots)) {
+                throw new Error('Backup contains an invalid screenshot list');
+            }
+            if (record.projectLanguages !== undefined &&
+                (!Array.isArray(record.projectLanguages) || !record.projectLanguages.every(l => typeof l === 'string'))) {
+                throw new Error('Backup contains an invalid language list');
+            }
+        }
+        for (const record of metaRecords) {
+            if (!isPlainObject(record) || typeof record.key !== 'string') {
+                throw new Error('Backup contains an invalid metadata record');
+            }
+            if (record.key === 'projects' && (!Array.isArray(record.value) ||
+                !record.value.every(p => isPlainObject(p) && typeof p.id === 'string' && typeof p.name === 'string'))) {
+                throw new Error('Backup contains an invalid project list');
+            }
+        }
+    }
+
     // Import project backup
     const importInput = document.getElementById('import-project-input');
     document.getElementById('import-project-btn').addEventListener('click', () => {
@@ -3821,6 +3893,9 @@ function setupEventListeners() {
         try {
             const text = await file.text();
             const dump = JSON.parse(text);
+            validateBackup(dump);
+            // Don't let a pending save of the in-memory project overwrite the imported data
+            cancelPendingSave();
             for (const storeName of Object.keys(dump)) {
                 if (!db.objectStoreNames.contains(storeName)) continue;
                 const tx = db.transaction(storeName, 'readwrite');
@@ -4721,7 +4796,7 @@ function updateLanguageMenu() {
     state.projectLanguages.forEach(lang => {
         const btn = document.createElement('button');
         btn.className = 'language-menu-item' + (lang === state.currentLanguage ? ' active' : '');
-        btn.innerHTML = `<span class="flag">${languageFlags[lang] || '🏳️'}</span> ${languageNames[lang] || lang.toUpperCase()}`;
+        btn.innerHTML = `<span class="flag">${languageFlags[lang] || '🏳️'}</span> ${escapeHtml(languageNames[lang] || lang.toUpperCase())}`;
         btn.onclick = () => {
             switchGlobalLanguage(lang);
             document.getElementById('language-menu').classList.remove('visible');
@@ -4778,7 +4853,7 @@ function updateLanguagesList() {
 
         item.innerHTML = `
             <span class="flag">${flag}</span>
-            <span class="name">${name}</span>
+            <span class="name">${escapeHtml(name)}</span>
             ${isCurrent ? '<span class="current-badge">Current</span>' : ''}
             <button class="remove-btn" ${isOnly ? 'disabled' : ''} title="${isOnly ? 'Cannot remove the only language' : 'Remove language'}">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -5052,9 +5127,9 @@ function openTranslateModal(target) {
         item.innerHTML = `
             <div class="translate-target-header">
                 <span class="flag">${languageFlags[lang]}</span>
-                <span>${languageNames[lang] || lang}</span>
+                <span>${escapeHtml(languageNames[lang] || lang)}</span>
             </div>
-            <textarea placeholder="Enter ${languageNames[lang] || lang} translation...">${texts[lang] || ''}</textarea>
+            <textarea placeholder="Enter ${escapeHtml(languageNames[lang] || lang)} translation...">${escapeHtml(texts[lang] || '')}</textarea>
         `;
         targetsContainer.appendChild(item);
     });
@@ -5280,7 +5355,7 @@ function showAppAlert(message, type = 'info') {
                         ${iconPath}
                     </svg>
                 </div>
-                <p class="modal-message" style="margin: 16px 0;">${message}</p>
+                <p class="modal-message" style="margin: 16px 0;">${escapeHtml(message)}</p>
                 <div class="modal-buttons">
                     <button class="modal-btn modal-btn-confirm" style="background: var(--accent);">OK</button>
                 </div>
@@ -5312,10 +5387,10 @@ function showAppConfirm(message, confirmText = 'Confirm', cancelText = 'Cancel')
                         <path d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
                     </svg>
                 </div>
-                <p class="modal-message" style="margin: 16px 0; white-space: pre-line;">${message}</p>
+                <p class="modal-message" style="margin: 16px 0; white-space: pre-line;">${escapeHtml(message)}</p>
                 <div class="modal-buttons">
-                    <button class="modal-btn modal-btn-cancel">${cancelText}</button>
-                    <button class="modal-btn modal-btn-confirm" style="background: var(--accent);">${confirmText}</button>
+                    <button class="modal-btn modal-btn-cancel">${escapeHtml(cancelText)}</button>
+                    <button class="modal-btn modal-btn-confirm" style="background: var(--accent);">${escapeHtml(confirmText)}</button>
                 </div>
             </div>
         `;
@@ -5355,7 +5430,7 @@ function showTranslateConfirmDialog(providerName) {
             const flag = languageFlags[lang] || '🏳️';
             const name = languageNames[lang] || lang.toUpperCase();
             const selected = lang === defaultLang ? 'selected' : '';
-            return `<option value="${lang}" ${selected}>${flag} ${name}</option>`;
+            return `<option value="${escapeHtml(lang)}" ${selected}>${flag} ${escapeHtml(name)}</option>`;
         }).join('');
 
         // Count texts for each language
@@ -6333,7 +6408,7 @@ function updateScreenshotList() {
                     <rect x="3" y="3" width="18" height="18" rx="2"/>
                 </svg>
               </div>`
-            : `<img class="screenshot-thumb" src="${thumbSrc}" alt="${screenshot.name}">`;
+            : `<img class="screenshot-thumb" src="${escapeHtml(thumbSrc)}" alt="${escapeHtml(screenshot.name)}">`;
 
         item.innerHTML = `
             <div class="drag-handle">
@@ -6345,8 +6420,8 @@ function updateScreenshotList() {
             </div>
             ${thumbHtml}
             <div class="screenshot-info">
-                <div class="screenshot-name">${screenshot.name}</div>
-                <div class="screenshot-device">${isTransferTarget ? 'Click source to copy style' : screenshot.deviceType}${langFlagsHtml}</div>
+                <div class="screenshot-name">${escapeHtml(screenshot.name)}</div>
+                <div class="screenshot-device">${isTransferTarget ? 'Click source to copy style' : escapeHtml(screenshot.deviceType)}${langFlagsHtml}</div>
             </div>
             ${buttonsHtml}
         `;
@@ -6748,8 +6823,8 @@ function updateGradientStopsUI() {
         const div = document.createElement('div');
         div.className = 'gradient-stop';
         div.innerHTML = `
-            <input type="color" value="${stop.color}" data-stop="${index}">
-            <input type="number" value="${stop.position}" min="0" max="100" data-stop="${index}">
+            <input type="color" value="${escapeHtml(stop.color)}" data-stop="${index}">
+            <input type="number" value="${escapeHtml(stop.position)}" min="0" max="100" data-stop="${index}">
             <span>%</span>
             ${index > 1 ? `<button class="screenshot-delete" data-stop="${index}">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -6798,7 +6873,7 @@ function getCanvasDimensions() {
 }
 
 function updateCanvas() {
-    saveState(); // Persist state on every update
+    scheduleSave(); // Persist state (debounced) on every update
     const dims = getCanvasDimensions();
     canvas.width = dims.width;
     canvas.height = dims.height;
@@ -8405,7 +8480,7 @@ async function loadIconPreview(item, name) {
             svg.style.height = '20px';
         }
     } catch (e) {
-        item.innerHTML = `<span style="font-size: 9px; color: var(--text-tertiary);">${name}</span>`;
+        item.innerHTML = `<span style="font-size: 9px; color: var(--text-tertiary);">${escapeHtml(name)}</span>`;
     }
 }
 
