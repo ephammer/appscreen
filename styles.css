@@ -2346,6 +2346,16 @@ input[type="range"]::-webkit-slider-thumb {
     opacity: 0.5;
 }
 
+.bezel-colors {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.bezel-colors .language-chip {
+    text-transform: capitalize;
+}
+
 .mirror-rtl-setting {
     margin-top: 16px;
 }
