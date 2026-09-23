@@ -3878,7 +3878,8 @@ function setupEventListeners() {
             a.href = URL.createObjectURL(blob);
             a.download = 'appscreen-backup-' + new Date().toISOString().slice(0, 10) + '.json';
             a.click();
-            URL.revokeObjectURL(a.href);
+            // Revoking synchronously can cancel the download in some browsers
+            setTimeout(() => URL.revokeObjectURL(a.href), 1000);
         } catch (e) {
             console.error('Export failed:', e);
             alert('Export failed: ' + e.message);
@@ -3926,24 +3927,44 @@ function setupEventListeners() {
         const file = e.target.files[0];
         if (!file || !db) return;
         try {
-            const text = await file.text();
-            const dump = JSON.parse(text);
+            const dump = JSON.parse(await file.text());
             validateBackup(dump);
-            // Don't let a pending save of the in-memory project overwrite the imported data
-            cancelPendingSave();
-            for (const storeName of Object.keys(dump)) {
-                if (!db.objectStoreNames.contains(storeName)) continue;
-                const tx = db.transaction(storeName, 'readwrite');
-                const store = tx.objectStore(storeName);
-                for (const record of dump[storeName]) {
-                    store.put(record);
+            // Persist pending edits to the open project before adding the imported ones
+            flushPendingSave();
+
+            // Merge into the existing project list instead of replacing it. Imported projects
+            // whose id is already taken get a fresh id, so no local project is overwritten.
+            // Only projects in the backup's list are imported (skips orphaned records).
+            const backupList = dump[META_STORE].find(r => r.key === 'projects')?.value || [];
+            const records = new Map(dump[PROJECTS_STORE].map(r => [r.id, r]));
+            const takenIds = new Set(projects.map(p => p.id));
+            const takenNames = new Set(projects.map(p => p.name));
+            const imported = backupList.map((entry, i) => {
+                let id = entry.id;
+                if (takenIds.has(id)) id = `project_${Date.now()}_${i}`;
+                let name = entry.name;
+                for (let n = 2; takenNames.has(name); n++) {
+                    name = `${entry.name} (imported${n > 2 ? ` ${n - 1}` : ''})`;
                 }
-                await new Promise((resolve, reject) => {
-                    tx.oncomplete = resolve;
-                    tx.onerror = () => reject(tx.error);
-                });
-            }
-            alert('Import complete! Reloading...');
+                takenIds.add(id);
+                takenNames.add(name);
+                const record = records.get(entry.id);
+                return { entry: { ...entry, id, name }, record: record && { ...record, id } };
+            });
+            if (imported.length === 0) throw new Error('Backup contains no projects');
+
+            const tx = db.transaction([PROJECTS_STORE, META_STORE], 'readwrite');
+            const projectStore = tx.objectStore(PROJECTS_STORE);
+            imported.forEach(({ record }) => { if (record) projectStore.put(record); });
+            const metaStore = tx.objectStore(META_STORE);
+            metaStore.put({ key: 'projects', value: [...projects, ...imported.map(p => p.entry)] });
+            metaStore.put({ key: 'currentProject', value: imported[0].entry.id });
+            await new Promise((resolve, reject) => {
+                tx.oncomplete = resolve;
+                tx.onabort = () => reject(tx.error);
+            });
+
+            alert(`Imported ${imported.length} project${imported.length !== 1 ? 's' : ''}. Reloading...`);
             location.reload();
         } catch (e) {
             console.error('Import failed:', e);
